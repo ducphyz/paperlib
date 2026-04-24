@@ -5,8 +5,12 @@ from pathlib import Path
 import click
 
 from paperlib.config import AppConfig, load_config
+from paperlib.models import status as status_values
+from paperlib.pipeline.clean import clean_text
 from paperlib.pipeline.discover import discover_pdfs
+from paperlib.pipeline.extract import extract_text_from_pdf
 from paperlib.pipeline.validate import validate_pdf
+from paperlib.store.fs import atomic_write_text, move_to_failed
 
 
 @click.group()
@@ -47,11 +51,12 @@ def validate_config(config_path: str) -> None:
 
 @main.command("ingest")
 @click.option("--dry-run", is_flag=True)
+@click.option("--limit", type=int, default=None)
 @click.option("--config", "config_path", default="config.toml", show_default=True)
-def ingest(dry_run: bool, config_path: str) -> None:
-    if not dry_run:
+def ingest(dry_run: bool, limit: int | None, config_path: str) -> None:
+    if not dry_run and limit is None:
         raise click.ClickException(
-            "Only ingest --dry-run is implemented in Phase 2."
+            "Phase 3 non-dry-run ingest requires --limit N."
         )
 
     try:
@@ -62,9 +67,71 @@ def ingest(dry_run: bool, config_path: str) -> None:
     _require_library_root(config)
 
     discovered = discover_pdfs(config.paths.inbox)
+    to_process = discovered[:limit] if limit is not None else discovered
 
+    if dry_run:
+        _print_dry_run_table(to_process)
+        return
+
+    _ensure_runtime_paths(config)
+
+    written = 0
+    failed = 0
+
+    click.echo("path | validation | extraction | quality | output")
+    for pdf in to_process:
+        validation = validate_pdf(pdf.path)
+        if not validation.ok:
+            failed_path = move_to_failed(pdf.path, config.paths.failed)
+            failed += 1
+            click.echo(
+                " | ".join(
+                    [
+                        str(pdf.path),
+                        "failed",
+                        "-",
+                        "-",
+                        str(failed_path),
+                    ]
+                )
+            )
+            continue
+
+        extraction = extract_text_from_pdf(
+            pdf.path,
+            min_char_count=config.extraction.min_char_count,
+            min_word_count=config.extraction.min_word_count,
+        )
+        if extraction.status == status_values.EXTRACTION_FAILED:
+            failed += 1
+            output = "-"
+        else:
+            text_path = config.paths.text / f"{pdf.hash16}.txt"
+            atomic_write_text(text_path, clean_text(extraction.raw_text))
+            written += 1
+            output = str(text_path)
+
+        click.echo(
+            " | ".join(
+                [
+                    str(pdf.path),
+                    "ok",
+                    extraction.status,
+                    extraction.quality,
+                    output,
+                ]
+            )
+        )
+
+    click.echo(
+        f"discovered={len(discovered)} processed={len(to_process)} "
+        f"written={written} failed={failed}"
+    )
+
+
+def _print_dry_run_table(pdfs) -> None:
     click.echo("path | hash16 | size (KB) | pages | validation | reason")
-    for pdf in discovered:
+    for pdf in pdfs:
         validation = validate_pdf(pdf.path)
         pages = (
             "-"
