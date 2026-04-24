@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/paperlib/__init__.py
+src/paperlib.egg-info/PKG-INFO
+src/paperlib.egg-info/SOURCES.txt
+src/paperlib.egg-info/dependency_links.txt
+src/paperlib.egg-info/top_level.txt
+src/paperlib/ai/__init__.py
+src/paperlib/models/__init__.py
+src/paperlib/pipeline/__init__.py
+src/paperlib/store/__init__.py
