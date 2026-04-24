@@ -1,0 +1,17 @@
+.env
+config.toml
+*.db
+*.db-*
+*.log
+__pycache__/
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+PaperLibrary/
+library/
+runtime/
+.coverage
+htmlcov/
