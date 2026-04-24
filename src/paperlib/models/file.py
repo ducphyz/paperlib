@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paperlib.models import status
+from paperlib.models import status as status_values
 
 
 @dataclass
 class ExtractionInfo:
-    status: str = status.EXTRACTION_PENDING
+    status: str = status_values.EXTRACTION_PENDING
     engine: str | None = None
     engine_version: str | None = None
     page_count: int | None = None
     char_count: int | None = None
     word_count: int | None = None
-    quality: str = status.QUALITY_UNKNOWN
+    quality: str = status_values.QUALITY_UNKNOWN
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -31,13 +31,13 @@ class ExtractionInfo:
     @classmethod
     def from_dict(cls, data: dict) -> "ExtractionInfo":
         return cls(
-            status=data.get("status", status.EXTRACTION_PENDING),
+            status=data.get("status", status_values.EXTRACTION_PENDING),
             engine=data.get("engine"),
             engine_version=data.get("engine_version"),
             page_count=data.get("page_count"),
             char_count=data.get("char_count"),
             word_count=data.get("word_count"),
-            quality=data.get("quality", status.QUALITY_UNKNOWN),
+            quality=data.get("quality", status_values.QUALITY_UNKNOWN),
             warnings=list(data.get("warnings", [])),
         )
 
