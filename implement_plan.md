@@ -329,7 +329,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "paperlib"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.14.3"
 dependencies = [
     "click>=8.1",
     "pdfplumber>=0.11",
