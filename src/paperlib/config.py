@@ -7,9 +7,9 @@ from typing import Any
 
 try:
     import tomllib
-except ModuleNotFoundError as exc:  # pragma: no cover - Python 3.11+ includes tomllib.
+except ModuleNotFoundError as exc:  # pragma: no cover - Python 3.14.3 includes tomllib.
     raise RuntimeError(
-        "tomllib is required. Use Python 3.11 or newer."
+        "tomllib is required. Use Python 3.14.3."
     ) from exc
 
 try:

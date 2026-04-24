@@ -29,6 +29,8 @@ Not implemented yet:
 
 ## Development setup
 
+Python 3.14.3 is the supported project runtime.
+
 ```bash
 conda create -n paperlib python=3.14.3 -y
 conda activate paperlib
