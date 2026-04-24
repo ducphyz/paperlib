@@ -5,6 +5,8 @@ from pathlib import Path
 import click
 
 from paperlib.config import AppConfig, load_config
+from paperlib.pipeline.discover import discover_pdfs
+from paperlib.pipeline.validate import validate_pdf
 
 
 @click.group()
@@ -21,9 +23,7 @@ def validate_config(config_path: str) -> None:
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if not config.library.root.exists():
-        message = f"Library root does not exist: {config.library.root}"
-        raise click.ClickException(message)
+    _require_library_root(config)
 
     path_statuses = _ensure_runtime_paths(config)
 
@@ -43,6 +43,54 @@ def validate_config(config_path: str) -> None:
         click.echo("ANTHROPIC_API_KEY: present")
     else:
         click.echo("ANTHROPIC_API_KEY: not required")
+
+
+@main.command("ingest")
+@click.option("--dry-run", is_flag=True)
+@click.option("--config", "config_path", default="config.toml", show_default=True)
+def ingest(dry_run: bool, config_path: str) -> None:
+    if not dry_run:
+        raise click.ClickException(
+            "Only ingest --dry-run is implemented in Phase 2."
+        )
+
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _require_library_root(config)
+
+    discovered = discover_pdfs(config.paths.inbox)
+
+    click.echo("path | hash16 | size (KB) | pages | validation | reason")
+    for pdf in discovered:
+        validation = validate_pdf(pdf.path)
+        pages = (
+            "-"
+            if validation.page_count is None
+            else str(validation.page_count)
+        )
+        validation_status = "ok" if validation.ok else "failed"
+        size_kb = pdf.size_bytes // 1024
+        click.echo(
+            " | ".join(
+                [
+                    str(pdf.path),
+                    pdf.hash16,
+                    str(size_kb),
+                    pages,
+                    validation_status,
+                    validation.reason,
+                ]
+            )
+        )
+
+
+def _require_library_root(config: AppConfig) -> None:
+    if not config.library.root.exists():
+        message = f"Library root does not exist: {config.library.root}"
+        raise click.ClickException(message)
 
 
 def _ensure_runtime_paths(config: AppConfig) -> list[tuple[str, Path, str]]:
