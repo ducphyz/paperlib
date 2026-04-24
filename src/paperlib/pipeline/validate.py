@@ -1,0 +1,1 @@
+"""PDF validation pipeline stage."""
