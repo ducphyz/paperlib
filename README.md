@@ -30,7 +30,7 @@ Not implemented yet:
 ## Development setup
 
 ```bash
-conda create -n paperlib python=3.11 -y
+conda create -n paperlib python=3.14.3 -y
 conda activate paperlib
 python -m pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
