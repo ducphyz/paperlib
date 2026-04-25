@@ -1,7 +1,14 @@
 from pathlib import Path
 import hashlib
 
-from paperlib.store.fs import atomic_write_text, move_to_failed, sha256_file
+from paperlib.store.fs import (
+    ascii_fold,
+    atomic_write_text,
+    canonical_pdf_relative_path,
+    move_to_failed,
+    sanitize_component,
+    sha256_file,
+)
 
 
 def test_sha256_file_matches_hashlib(tmp_path: Path):
@@ -10,6 +17,91 @@ def test_sha256_file_matches_hashlib(tmp_path: Path):
     p.write_bytes(data)
 
     assert sha256_file(p) == hashlib.sha256(data).hexdigest()
+
+
+def test_ascii_fold_removes_non_ascii_marks():
+    assert ascii_fold("José Müller") == "Jose Muller"
+
+
+def test_sanitize_component_returns_empty_for_falsy_input():
+    assert sanitize_component("") == ""
+    assert sanitize_component(None) == ""
+
+
+def test_sanitize_component_folds_lowercases_and_replaces_separators():
+    assert sanitize_component(" José / Smith, Jr.; Test: Name ") == (
+        "jose_smith_jr_test_name"
+    )
+
+
+def test_sanitize_component_removes_dots_and_other_punctuation():
+    assert sanitize_component("Smith Jr.") == "smith_jr"
+    assert sanitize_component("A+B=C!") == "abc"
+
+
+def test_sanitize_component_collapses_and_strips_underscores_hyphens():
+    assert sanitize_component("__A   B---") == "a_b"
+
+
+def test_sanitize_component_truncates_and_strips_suffix():
+    assert sanitize_component("alpha beta gamma", max_len=11) == "alpha_beta"
+
+
+def test_sanitize_component_required_phase4_cases():
+    assert sanitize_component("Müller") == "muller"
+    assert sanitize_component("van den Berg") == "van_den_berg"
+    assert sanitize_component("Smith Jr.") == "smith_jr"
+    assert sanitize_component("") == ""
+    assert len(sanitize_component("a" * 100)) <= 40
+    assert sanitize_component("Cao/Chen:Wang") == "cao_chen_wang"
+    assert sanitize_component("  --Smith,, Wang--  ") == "smith_wang"
+    assert sanitize_component("Al-InAs 2DEG") == "al-inas_2deg"
+
+
+def test_canonical_pdf_relative_path_with_known_year_and_author():
+    assert canonical_pdf_relative_path(
+        year=2024,
+        first_author="Smith",
+        file_hash="abcdef1234567890",
+    ) == "papers/2024/2024_smith_abcdef12.pdf"
+
+
+def test_canonical_pdf_relative_path_with_unknown_components():
+    assert canonical_pdf_relative_path(
+        year=None,
+        first_author=None,
+        file_hash="abcdef1234567890",
+    ) == (
+        "papers/unknown_year/"
+        "unknown_year_unknown_author_abcdef12.pdf"
+    )
+
+
+def test_canonical_pdf_relative_path_sanitizes_author_and_returns_string():
+    value = canonical_pdf_relative_path(
+        year=2024,
+        first_author="Müller",
+        file_hash="abcdef1234567890",
+    )
+
+    assert value == "papers/2024/2024_muller_abcdef12.pdf"
+    assert isinstance(value, str)
+
+
+def test_canonical_pdf_relative_path_empty_author_uses_fallback():
+    assert canonical_pdf_relative_path(
+        year=2024,
+        first_author="",
+        file_hash="abcdef1234567890",
+    ) == "papers/2024/2024_unknown_author_abcdef12.pdf"
+
+
+def test_canonical_pdf_relative_path_sanitizes_author_separators():
+    assert canonical_pdf_relative_path(
+        year=2024,
+        first_author="Cao/Chen:Wang",
+        file_hash="abcdef1234567890",
+    ) == "papers/2024/2024_cao_chen_wang_abcdef12.pdf"
 
 
 def test_atomic_write_text_writes_expected_utf8_content(tmp_path: Path):

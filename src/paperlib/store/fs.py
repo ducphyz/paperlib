@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from paperlib.config import AppConfig
@@ -30,6 +32,45 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def ascii_fold(s: str) -> str:
+    return unicodedata.normalize("NFKD", s).encode(
+        "ascii", "ignore"
+    ).decode("ascii")
+
+
+def sanitize_component(s: str, max_len: int = 40) -> str:
+    if not s:
+        return ""
+
+    sanitized = ascii_fold(s).lower()
+    sanitized = re.sub(r"[\s/\\,;:]+", "_", sanitized)
+    sanitized = re.sub(r"[^a-z0-9_-]", "", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized)
+    sanitized = sanitized.strip("_-")
+    if len(sanitized) > max_len:
+        sanitized = sanitized[:max_len].rstrip("_-")
+    return sanitized
+
+
+def canonical_pdf_relative_path(
+    *,
+    year: int | None,
+    first_author: str | None,
+    file_hash: str,
+) -> str:
+    year_component = str(year) if year is not None else "unknown_year"
+    author_component = (
+        sanitize_component(first_author) if first_author is not None else ""
+    )
+    if not author_component:
+        author_component = "unknown_author"
+
+    hash8 = file_hash[:8]
+    filename = f"{year_component}_{author_component}_{hash8}.pdf"
+    directory = f"papers/{year_component}"
+    return f"{directory}/{filename}"
 
 
 def atomic_write_text(path: Path, text: str) -> None:
