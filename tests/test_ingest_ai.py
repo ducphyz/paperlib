@@ -14,7 +14,7 @@ from paperlib.config import (
 )
 from paperlib.models import status
 from paperlib.pipeline.extract import ExtractionResult
-from paperlib.pipeline.ingest import ingest_library
+from paperlib.pipeline.ingest import IngestReport, ingest_library
 from paperlib.pipeline.validate import ValidationResult
 from paperlib.store.json_store import read_record
 
@@ -180,6 +180,30 @@ def test_no_ai_does_not_call_summarise_record_or_anthropic(
     assert record.summary["status"] == status.SUMMARY_SKIPPED
 
 
+def test_ingest_report_can_be_constructed_with_all_fields():
+    report = IngestReport(
+        discovered=1,
+        processed=2,
+        skipped_existing=3,
+        failed=4,
+        records_written=5,
+        summaries_generated=6,
+        summaries_failed=7,
+        summaries_skipped=8,
+        warnings=["warning"],
+    )
+
+    assert report.discovered == 1
+    assert report.processed == 2
+    assert report.skipped_existing == 3
+    assert report.failed == 4
+    assert report.records_written == 5
+    assert report.summaries_generated == 6
+    assert report.summaries_failed == 7
+    assert report.summaries_skipped == 8
+    assert report.warnings == ["warning"]
+
+
 def test_config_ai_disabled_does_not_call_summarise_record(
     tmp_path: Path, monkeypatch
 ):
@@ -309,7 +333,7 @@ def test_exact_duplicate_does_not_call_ai(tmp_path: Path, monkeypatch):
     second = ingest_library(config, no_ai=False)
 
     assert second.discovered == 1
-    assert second.processed == 1
+    assert second.processed == 0
     assert second.skipped_existing == 1
     assert second.records_written == 0
     assert second.summaries_generated == 0
