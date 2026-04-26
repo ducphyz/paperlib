@@ -1,10 +1,13 @@
 from pathlib import Path
 import hashlib
+import pytest
 
 from paperlib.store.fs import (
     ascii_fold,
     atomic_write_text,
     canonical_pdf_relative_path,
+    move_file,
+    move_to_duplicates,
     move_to_failed,
     sanitize_component,
     sha256_file,
@@ -179,3 +182,28 @@ def test_move_to_failed_increments_collision_suffix(tmp_path: Path):
     destination = move_to_failed(source, failed_dir)
 
     assert destination == failed_dir / "bad_2.pdf"
+
+
+def test_move_to_duplicates_preserves_name_and_content(tmp_path: Path):
+    source = tmp_path / "paper.pdf"
+    duplicates_dir = tmp_path / "duplicates"
+    source.write_bytes(b"duplicate")
+
+    destination = move_to_duplicates(source, duplicates_dir)
+
+    assert destination == duplicates_dir / "paper.pdf"
+    assert destination.read_bytes() == b"duplicate"
+    assert not source.exists()
+
+
+def test_move_file_raises_if_destination_exists(tmp_path: Path):
+    source = tmp_path / "source.pdf"
+    destination = tmp_path / "dest.pdf"
+    source.write_bytes(b"source")
+    destination.write_bytes(b"dest")
+
+    with pytest.raises(FileExistsError):
+        move_file(source, destination)
+
+    assert source.read_bytes() == b"source"
+    assert destination.read_bytes() == b"dest"

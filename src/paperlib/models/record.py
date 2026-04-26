@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from paperlib.models import status as status_values
@@ -81,7 +82,7 @@ class PaperRecord:
                 name: field_value.to_dict()
                 for name, field_value in self.metadata.items()
             },
-            "summary": dict(self.summary),
+            "summary": deepcopy(self.summary),
             "status": dict(self.status),
             "review": dict(self.review),
             "timestamps": dict(self.timestamps),
@@ -89,10 +90,27 @@ class PaperRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "PaperRecord":
-        metadata = {
-            name: MetadataField.from_dict(field_data)
-            for name, field_data in data.get("metadata", {}).items()
-        }
+        metadata_data = data.get("metadata", {})
+        metadata = _default_metadata()
+        metadata.update(
+            {
+                name: MetadataField.from_dict(field_data)
+                for name, field_data in metadata_data.items()
+                if name in metadata
+            }
+        )
+
+        summary = _merge_dict(_default_summary(), data.get("summary", {}))
+        if isinstance(summary.get("physics"), dict):
+            summary["physics"] = _merge_dict(
+                _default_summary()["physics"], summary["physics"]
+            )
+
+        status = _merge_dict(_default_status(), data.get("status", {}))
+        review = _merge_dict(_default_review(), data.get("review", {}))
+        timestamps = _merge_dict(
+            _default_timestamps(), data.get("timestamps", {})
+        )
 
         return cls(
             schema_version=data.get("schema_version", 1),
@@ -102,9 +120,17 @@ class PaperRecord:
                 FileRecord.from_dict(file_data)
                 for file_data in data.get("files", [])
             ],
-            metadata=metadata or _default_metadata(),
-            summary=dict(data.get("summary", _default_summary())),
-            status=dict(data.get("status", _default_status())),
-            review=dict(data.get("review", _default_review())),
-            timestamps=dict(data.get("timestamps", _default_timestamps())),
+            metadata=metadata,
+            summary=summary,
+            status=status,
+            review=review,
+            timestamps=timestamps,
         )
+
+
+def _merge_dict(defaults: dict, data: dict) -> dict:
+    merged = deepcopy(defaults)
+    for key, value in data.items():
+        if key in merged:
+            merged[key] = value
+    return merged

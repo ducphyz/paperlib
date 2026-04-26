@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+from paperlib.config import AppConfig
+from paperlib.models import status as status_values
+from paperlib.models.file import ExtractionInfo, FileRecord
+from paperlib.models.identity import PaperIdentity, build_aliases
+from paperlib.models.record import PaperRecord
+from paperlib.pipeline.clean import clean_text
+from paperlib.pipeline.discover import DiscoveredPDF, discover_pdfs
+from paperlib.pipeline.extract import extract_text_from_pdf
+from paperlib.pipeline.metadata import (
+    build_non_ai_metadata_fields,
+    extract_non_ai_metadata,
+)
+from paperlib.pipeline.validate import validate_pdf
+from paperlib.store import db
+from paperlib.store.fs import (
+    atomic_write_text,
+    canonical_pdf_relative_path,
+    ensure_runtime_dirs,
+    move_file,
+    move_to_failed,
+)
+from paperlib.store.json_store import read_record, write_record_atomic
+
+
+@dataclass
+class IngestReport:
+    discovered: int = 0
+    processed: int = 0
+    skipped_existing: int = 0
+    failed: int = 0
+    records_written: int = 0
+    summaries_generated: int = 0
+    summaries_failed: int = 0
+    summaries_skipped: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def ingest_library(
+    config: AppConfig,
+    *,
+    limit: int | None = None,
+    dry_run: bool = False,
+    no_ai: bool = True,
+) -> IngestReport:
+    if not config.library.root.exists():
+        raise FileNotFoundError(
+            f"Library root does not exist: {config.library.root}"
+        )
+
+    discovered = discover_pdfs(config.paths.inbox)
+    selected = discovered[:limit] if limit is not None else discovered
+    report = IngestReport(discovered=len(discovered))
+
+    if dry_run:
+        for pdf in selected:
+            validate_pdf(pdf.path)
+            report.processed += 1
+        return report
+
+    if not no_ai:
+        report.warnings.append("AI ingest is not implemented in Phase 5")
+
+    ensure_runtime_dirs(config)
+    conn = db.connect(config.paths.db)
+    db.init_db(conn)
+    try:
+        for pdf in selected:
+            report.processed += 1
+            try:
+                if db.file_exists(conn, pdf.file_hash):
+                    report.skipped_existing += 1
+                    continue
+                _ingest_pdf(config, conn, pdf, report)
+            except Exception as exc:
+                report.failed += 1
+                report.warnings.append(f"{pdf.path}: {exc}")
+    finally:
+        conn.close()
+
+    return report
+
+
+def _ingest_pdf(
+    config: AppConfig, conn, pdf: DiscoveredPDF, report: IngestReport
+) -> None:
+    validation = validate_pdf(pdf.path)
+    if not validation.ok:
+        failed_path = move_to_failed(pdf.path, config.paths.failed)
+        db.log_processing_run(
+            conn,
+            pdf.file_hash,
+            None,
+            "validate",
+            status_values.EXTRACTION_FAILED,
+            f"{validation.reason}; moved to {failed_path}",
+        )
+        report.failed += 1
+        return
+
+    extraction = extract_text_from_pdf(
+        pdf.path,
+        min_char_count=config.extraction.min_char_count,
+        min_word_count=config.extraction.min_word_count,
+    )
+    cleaned_text = clean_text(extraction.raw_text)
+    metadata_values = extract_non_ai_metadata(cleaned_text, pdf.path.name)
+    aliases = build_aliases(
+        pdf.hash16,
+        doi=metadata_values["doi"],
+        arxiv_id=metadata_values["arxiv_id"],
+    )
+    paper_id = _find_existing_paper_id(conn, aliases[1:])
+    now = _utc_now()
+    file_record = _build_file_record(
+        config, pdf, extraction, metadata_values, now
+    )
+
+    if paper_id is None:
+        paper_id = f"p_{pdf.hash16}"
+        record = _new_record(
+            paper_id=paper_id,
+            aliases=aliases,
+            metadata_values=metadata_values,
+            now=now,
+        )
+    else:
+        record = read_record(config.paths.records / f"{paper_id}.json")
+        record.status["duplicate"] = status_values.DUPLICATE_ALIAS
+        record.identity.aliases = _merge_unique(record.identity.aliases, aliases)
+        record.timestamps.setdefault("created_at", now)
+        record.timestamps["updated_at"] = now
+
+    if not any(existing.file_hash == pdf.file_hash for existing in record.files):
+        record.files.append(file_record)
+
+    canonical_path = config.library.root / file_record.canonical_path
+    move_file(pdf.path, canonical_path)
+    atomic_write_text(config.paths.text / f"{pdf.hash16}.txt", cleaned_text)
+
+    record_path = config.paths.records / f"{record.paper_id}.json"
+    write_record_atomic(record_path, record)
+
+    db.record_ingest_success(
+        conn,
+        record,
+        file_record,
+        f"records/{record.paper_id}.json",
+    )
+    report.records_written += 1
+    report.summaries_skipped += 1
+
+
+def _build_file_record(
+    config: AppConfig,
+    pdf: DiscoveredPDF,
+    extraction,
+    metadata_values: dict,
+    now: str,
+) -> FileRecord:
+    canonical_path = canonical_pdf_relative_path(
+        year=metadata_values["year"],
+        first_author=None,
+        file_hash=pdf.file_hash,
+    )
+    return FileRecord(
+        file_hash=pdf.file_hash,
+        original_filename=pdf.path.name,
+        canonical_path=canonical_path,
+        text_path=f"text/{pdf.hash16}.txt",
+        size_bytes=pdf.size_bytes,
+        added_at=now,
+        extraction=ExtractionInfo(
+            status=extraction.status,
+            engine=extraction.engine,
+            engine_version=extraction.engine_version,
+            page_count=extraction.page_count,
+            char_count=extraction.char_count,
+            word_count=extraction.word_count,
+            quality=extraction.quality,
+            warnings=list(extraction.warnings),
+        ),
+    )
+
+
+def _new_record(
+    *,
+    paper_id: str,
+    aliases: list[str],
+    metadata_values: dict,
+    now: str,
+) -> PaperRecord:
+    record = PaperRecord(
+        paper_id=paper_id,
+        identity=PaperIdentity(
+            doi=metadata_values["doi"],
+            arxiv_id=metadata_values["arxiv_id"],
+            aliases=aliases,
+        ),
+        metadata=build_non_ai_metadata_fields(
+            year=metadata_values["year"],
+            year_confidence=metadata_values["year_confidence"],
+            doi=metadata_values["doi"],
+            arxiv_id=metadata_values["arxiv_id"],
+            now_iso=now,
+        ),
+        timestamps={"created_at": now, "updated_at": now},
+    )
+    record.status["duplicate"] = status_values.DUPLICATE_UNIQUE
+    if any(
+        metadata_values[key] is not None
+        for key in ("doi", "arxiv_id", "year")
+    ):
+        record.status["metadata"] = status_values.METADATA_PARTIAL
+    record.summary["status"] = status_values.SUMMARY_SKIPPED
+    record.summary["source_file_hash"] = None
+    record.status["summary"] = status_values.SUMMARY_SKIPPED
+    return record
+
+
+def _find_existing_paper_id(conn, aliases: list[str]) -> str | None:
+    for alias in aliases:
+        paper_id = db.find_paper_id_by_alias(conn, alias)
+        if paper_id is not None:
+            return paper_id
+    return None
+
+
+def _merge_unique(existing: list[str], incoming: list[str]) -> list[str]:
+    merged = list(existing)
+    for value in incoming:
+        if value not in merged:
+            merged.append(value)
+    return merged
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )

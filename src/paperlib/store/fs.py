@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -99,10 +100,31 @@ def atomic_write_text(path: Path, text: str) -> None:
                 pass
 
 
-def move_to_failed(path: Path, failed_dir: Path) -> Path:
+def move_file(src: Path, dst: Path) -> None:
+    if dst.exists():
+        raise FileExistsError(dst)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(src, dst)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.move(str(src), str(dst))
+
+
+def move_to_failed(src: Path, failed_dir: Path) -> Path:
     failed_dir.mkdir(parents=True, exist_ok=True)
-    destination = _unique_destination(failed_dir / path.name)
-    return Path(shutil.move(str(path), str(destination)))
+    destination = _unique_destination(failed_dir / src.name)
+    move_file(src, destination)
+    return destination
+
+
+def move_to_duplicates(src: Path, duplicates_dir: Path) -> Path:
+    duplicates_dir.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(duplicates_dir / src.name)
+    move_file(src, destination)
+    return destination
 
 
 def _unique_destination(destination: Path) -> Path:
