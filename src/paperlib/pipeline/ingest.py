@@ -68,11 +68,11 @@ def ingest_library(
     db.init_db(conn)
     try:
         for pdf in selected:
-            report.processed += 1
             try:
                 if db.file_exists(conn, pdf.file_hash):
                     report.skipped_existing += 1
                     continue
+                report.processed += 1
                 _ingest_pdf(config, conn, pdf, report, no_ai=no_ai)
             except Exception as exc:
                 report.failed += 1

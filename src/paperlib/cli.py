@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
@@ -9,6 +10,7 @@ from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
+from paperlib.store.json_store import read_record_dict
 
 
 @click.group()
@@ -136,19 +138,124 @@ def status(config_path: str) -> None:
     click.echo(f"{'summary failed:':<21}{counts['summary_failed']}")
 
 
+@main.command("show")
+@click.argument("id_or_alias")
+@click.option("--config", "config_path", default="config.toml", show_default=True)
+def show(id_or_alias: str, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    try:
+        paper_id = db.resolve_id(conn, id_or_alias)
+        if paper_id is None:
+            raise click.ClickException(f"Paper not found: {id_or_alias}")
+        record_path_value = db.get_record_path(conn, paper_id)
+    finally:
+        conn.close()
+
+    if record_path_value is None:
+        raise click.ClickException(f"Record path not found for: {paper_id}")
+
+    record_path = Path(record_path_value)
+    if not record_path.is_absolute():
+        record_path = config.library.root / record_path
+
+    try:
+        record = read_record_dict(record_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(json.dumps(record, indent=2, ensure_ascii=False))
+
+
+@main.command("list")
+@click.option("--needs-review", is_flag=True)
+@click.option("--config", "config_path", default="config.toml", show_default=True)
+def list_command(needs_review: bool, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    try:
+        rows = db.list_papers(conn, needs_review=needs_review)
+    finally:
+        conn.close()
+
+    click.echo(
+        " | ".join(
+            ["paper_id", "year", "first_author", "title", "review_status"]
+        )
+    )
+    for row in rows:
+        click.echo(
+            " | ".join(
+                [
+                    row["paper_id"],
+                    _format_year(row.get("year")),
+                    _first_author(row.get("authors_json")),
+                    _truncate_title(row.get("title")),
+                    row.get("review_status") or "",
+                ]
+            )
+        )
+
+
 def _print_ingest_report(report) -> None:
-    click.echo(f"discovered: {report.discovered}")
-    click.echo(f"processed: {report.processed}")
-    click.echo(f"skipped_existing: {report.skipped_existing}")
-    click.echo(f"failed: {report.failed}")
-    click.echo(f"records_written: {report.records_written}")
-    click.echo(f"summaries_generated: {report.summaries_generated}")
-    click.echo(f"summaries_failed: {report.summaries_failed}")
-    click.echo(f"summaries_skipped: {report.summaries_skipped}")
-    click.echo(f"warnings: {len(report.warnings)}")
+    click.echo(f"{'discovered:':<21}{report.discovered}")
+    click.echo(f"{'processed:':<21}{report.processed}")
+    click.echo(f"{'skipped existing:':<21}{report.skipped_existing}")
+    click.echo(f"{'failed:':<21}{report.failed}")
+    click.echo(f"{'records written:':<21}{report.records_written}")
+    click.echo(f"{'summaries generated:':<21}{report.summaries_generated}")
+    click.echo(f"{'summaries failed:':<21}{report.summaries_failed}")
+    click.echo(f"{'summaries skipped:':<21}{report.summaries_skipped}")
+    click.echo(f"{'warnings:':<21}{len(report.warnings)}")
     if report.warnings:
+        click.echo("Warnings:")
         for warning in report.warnings:
             click.echo(f"- {warning}")
+
+
+def _format_year(value) -> str:
+    return "<unknown>" if value is None else str(value)
+
+
+def _first_author(authors_json) -> str:
+    if not authors_json:
+        return "<unknown>"
+    try:
+        authors = json.loads(authors_json)
+    except (TypeError, json.JSONDecodeError):
+        return "<unknown>"
+    if not isinstance(authors, list) or not authors:
+        return "<unknown>"
+    first = authors[0]
+    if not isinstance(first, str) or not first.strip():
+        return "<unknown>"
+    return first.strip()
+
+
+def _truncate_title(value) -> str:
+    if not value:
+        return "<no title>"
+    return value if len(value) <= 60 else f"{value[:57]}..."
 
 
 def _print_dry_run_table(pdfs) -> None:

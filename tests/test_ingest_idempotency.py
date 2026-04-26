@@ -250,7 +250,7 @@ def test_ingest_library_skips_existing_file_hash_on_second_run(
     second = ingest_library(config, no_ai=True)
 
     assert second.discovered == 1
-    assert second.processed == 1
+    assert second.processed == 0
     assert second.skipped_existing == 1
     assert second.records_written == 0
     assert second.failed == 0

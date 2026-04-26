@@ -292,6 +292,14 @@ def resolve_id(conn: sqlite3.Connection, id_or_alias: str) -> str | None:
     return None
 
 
+def get_record_path(conn: sqlite3.Connection, paper_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT record_path FROM papers WHERE paper_id = ?",
+        (paper_id,),
+    ).fetchone()
+    return None if row is None else row["record_path"]
+
+
 def list_papers(
     conn: sqlite3.Connection, *, needs_review: bool = False
 ) -> list[dict]:

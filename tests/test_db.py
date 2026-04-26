@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from paperlib.store import db
 from paperlib.store.json_store import write_record_atomic
@@ -168,6 +169,14 @@ def test_resolve_id_accepts_aliases_and_bare_hash(tmp_path: Path):
     assert db.resolve_id(conn, "ABCDEF1234567890") == "p_abc"
 
 
+def test_get_record_path_returns_path_for_existing_paper(tmp_path: Path):
+    conn = _conn(tmp_path)
+    db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
+
+    assert db.get_record_path(conn, "p_abc") == "records/p_abc.json"
+    assert db.get_record_path(conn, "p_missing") is None
+
+
 def test_list_papers_returns_inserted_row(tmp_path: Path):
     conn = _conn(tmp_path)
     db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
@@ -185,6 +194,43 @@ def test_list_papers_returns_inserted_row(tmp_path: Path):
     ]
 
 
+def test_list_papers_sorts_by_year_desc_null_last_then_paper_id(tmp_path: Path):
+    conn = _conn(tmp_path)
+    older = _record("p_older")
+    older["metadata"]["year"]["value"] = 2023
+    newer_b = _record("p_newer_b")
+    newer_b["metadata"]["year"]["value"] = 2025
+    newer_a = _record("p_newer_a")
+    newer_a["metadata"]["year"]["value"] = 2025
+    missing = _record("p_missing_year")
+    missing["metadata"]["year"]["value"] = None
+
+    for record in (older, newer_b, missing, newer_a):
+        db.upsert_paper(conn, record, f"records/{record['paper_id']}.json")
+
+    rows = db.list_papers(conn)
+
+    assert [row["paper_id"] for row in rows] == [
+        "p_newer_a",
+        "p_newer_b",
+        "p_older",
+        "p_missing_year",
+    ]
+
+
+def test_list_papers_needs_review_filters_review_status(tmp_path: Path):
+    conn = _conn(tmp_path)
+    needs_review = _record("p_needs")
+    reviewed = _record("p_reviewed")
+    reviewed["status"]["review"] = "reviewed"
+    db.upsert_paper(conn, needs_review, "records/p_needs.json")
+    db.upsert_paper(conn, reviewed, "records/p_reviewed.json")
+
+    rows = db.list_papers(conn, needs_review=True)
+
+    assert [row["paper_id"] for row in rows] == ["p_needs"]
+
+
 def test_get_status_counts(tmp_path: Path):
     conn = _conn(tmp_path)
     db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
@@ -197,6 +243,39 @@ def test_get_status_counts(tmp_path: Path):
     assert counts["extraction_ok"] == 1
     assert counts["needs_review"] == 1
     assert counts["summary_pending"] == 1
+
+
+def test_get_status_counts_returns_all_required_values(tmp_path: Path):
+    conn = _conn(tmp_path)
+    first = _record("p_first")
+    first["status"]["summary"] = "pending"
+    first["status"]["review"] = "needs_review"
+    second = _record("p_second")
+    second["status"]["summary"] = "failed"
+    second["status"]["review"] = "reviewed"
+
+    db.upsert_paper(conn, first, "records/p_first.json")
+    db.upsert_paper(conn, second, "records/p_second.json")
+    db.insert_file(conn, "p_first", _file("a" * 64))
+    partial = _file("b" * 64)
+    partial["extraction"]["status"] = "partial"
+    db.insert_file(conn, "p_second", partial)
+    failed = _file("c" * 64)
+    failed["extraction"]["status"] = "failed"
+    db.insert_file(conn, "p_second", failed)
+
+    counts = db.get_status_counts(conn)
+
+    assert counts == {
+        "papers": 2,
+        "files": 3,
+        "extraction_ok": 1,
+        "extraction_partial": 1,
+        "extraction_failed": 1,
+        "needs_review": 1,
+        "summary_pending": 1,
+        "summary_failed": 1,
+    }
 
 
 def test_rebuild_index_from_records_loads_valid_records_and_skips_errors(
@@ -233,6 +312,10 @@ def test_rebuild_index_from_records_loads_valid_records_and_skips_errors(
     assert result["json_errors"] == 2
     assert result["backup_path"] is not None
     assert Path(result["backup_path"]).exists()
+    assert re.search(
+        r"library\.backup-\d{8}-\d{6}\.db$",
+        result["backup_path"],
+    )
 
     conn = db.connect(db_path)
     assert db.resolve_id(conn, "p_stale") is None
@@ -248,3 +331,45 @@ def test_rebuild_index_from_records_loads_valid_records_and_skips_errors(
         "SELECT record_path FROM papers WHERE paper_id = 'p_valid'"
     ).fetchone()[0] == "records/p_valid.json"
     conn.close()
+
+
+def test_rebuild_index_counts_match_multiple_valid_records(tmp_path: Path):
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    db_path = tmp_path / "db" / "library.db"
+
+    first = _record("p_first")
+    first["schema_version"] = SCHEMA_VERSION
+    first["identity"]["aliases"] = [
+        "hash:1111111111111111",
+        "arxiv:2401.11111",
+    ]
+    first["files"] = [_file("1" * 64)]
+    second = _record("p_second")
+    second["schema_version"] = SCHEMA_VERSION
+    second["identity"]["aliases"] = ["hash:2222222222222222"]
+    second["files"] = [_file("2" * 64), _file("3" * 64)]
+
+    write_record_atomic(records_dir / "p_first.json", first)
+    write_record_atomic(records_dir / "p_second.json", second)
+
+    result = db.rebuild_index_from_records(db_path, records_dir)
+
+    assert result == {
+        "records_loaded": 2,
+        "records_skipped": 0,
+        "json_errors": 0,
+        "backup_path": None,
+    }
+
+    conn = db.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM aliases").fetchone()[0] == 3
+        assert (
+            conn.execute("SELECT COUNT(*) FROM processing_runs").fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
