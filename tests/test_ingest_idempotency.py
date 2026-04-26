@@ -297,9 +297,9 @@ def test_ingest_library_reuses_record_for_existing_non_hash_alias(
     assert len(list(config.paths.records.glob("p_*.json"))) == 1
     assert updated_record.paper_id == original_record.paper_id
     assert updated_record.status["duplicate"] == status.DUPLICATE_ALIAS
-    assert updated_record.summary["status"] == status.SUMMARY_GENERATED
+    assert updated_record.summary["status"] == status.SUMMARY_SKIPPED
     assert updated_record.summary["one_sentence"] == "Existing summary."
-    assert updated_record.status["summary"] == status.SUMMARY_GENERATED
+    assert updated_record.status["summary"] == status.SUMMARY_SKIPPED
     assert len(updated_record.files) == 2
     assert len(updated_record.identity.aliases) == len(
         set(updated_record.identity.aliases)

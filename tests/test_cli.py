@@ -2,10 +2,9 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from paperlib.models import status
 from paperlib.cli import main
 from paperlib.pipeline.discover import DiscoveredPDF
-from paperlib.pipeline.extract import ExtractionResult
+from paperlib.pipeline.ingest import IngestReport
 from paperlib.pipeline.validate import ValidationResult
 
 
@@ -45,7 +44,7 @@ temperature = 0.2
     )
 
 
-def test_ingest_dry_run_prints_discovery_validation_table(
+def test_ingest_dry_run_prints_table_and_forces_no_ai(
     tmp_path: Path, monkeypatch
 ):
     root = tmp_path / "library"
@@ -60,6 +59,7 @@ def test_ingest_dry_run_prints_discovery_validation_table(
         size_bytes=2048,
         modified_time="2026-04-25T12:34:56Z",
     )
+    calls = []
 
     monkeypatch.setattr(
         "paperlib.cli.discover_pdfs",
@@ -67,131 +67,118 @@ def test_ingest_dry_run_prints_discovery_validation_table(
     )
     monkeypatch.setattr(
         "paperlib.cli.validate_pdf",
-        lambda path: ValidationResult(
-            path=path,
-            ok=True,
-            page_count=3,
-            has_text=True,
-            reason="ok",
-        ),
+        lambda path: ValidationResult(path, True, 3, True, "ok"),
     )
 
-    runner = CliRunner()
-    result = runner.invoke(
-        main, ["ingest", "--dry-run", "--config", str(config_path)]
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        calls.append((limit, dry_run, no_ai))
+        return IngestReport(discovered=1, processed=1)
+
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--dry-run", "--limit", "1", "--config", str(config_path)],
     )
 
     assert result.exit_code == 0
     assert "path | hash16 | size (KB) | pages | validation | reason" in result.output
-    assert f"{discovered.path} | {discovered.hash16} | 2 | 3 | ok | ok" in result.output
-
-
-def test_ingest_non_dry_run_requires_limit(tmp_path: Path):
-    runner = CliRunner()
-
-    result = runner.invoke(
-        main, ["ingest", "--config", str(tmp_path / "config.toml")]
+    assert (
+        f"{discovered.path} | {discovered.hash16} | 2 | 3 | ok | ok"
+        in result.output
     )
-
-    assert result.exit_code != 0
-    assert "Phase 3 non-dry-run ingest requires --limit N." in result.output
+    assert calls == [(1, True, True)]
 
 
-def test_ingest_limit_writes_cleaned_text(tmp_path: Path, monkeypatch):
+def test_ingest_no_ai_routes_to_ingest_library_without_ai(
+    tmp_path: Path, monkeypatch
+):
     root = tmp_path / "library"
     root.mkdir()
     config_path = tmp_path / "config.toml"
     _write_config(config_path, root)
-    discovered = DiscoveredPDF(
-        path=root / "inbox" / "paper.pdf",
-        file_hash="a" * 64,
-        hash16="a" * 16,
-        hash8="a" * 8,
-        size_bytes=2048,
-        modified_time="2026-04-25T12:34:56Z",
+    calls = []
+
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        calls.append((limit, dry_run, no_ai))
+        return IngestReport(discovered=2, processed=2, summaries_skipped=2)
+
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--no-ai", "--limit", "2", "--config", str(config_path)],
     )
 
-    monkeypatch.setattr(
-        "paperlib.cli.discover_pdfs",
-        lambda inbox_path: [discovered],
-    )
-    monkeypatch.setattr(
-        "paperlib.cli.validate_pdf",
-        lambda path: ValidationResult(
-            path=path,
-            ok=True,
-            page_count=1,
-            has_text=True,
-            reason="ok",
-        ),
-    )
-    monkeypatch.setattr(
-        "paperlib.cli.extract_text_from_pdf",
-        lambda path, *, min_char_count, min_word_count: ExtractionResult(
-            path=path,
-            status=status.EXTRACTION_OK,
-            engine="pdfplumber",
-            engine_version="test",
-            page_count=1,
-            char_count=8,
-            word_count=2,
-            quality=status.QUALITY_GOOD,
-            warnings=[],
-            raw_text="  hello\t\tworld  ",
-        ),
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(
-        main, ["ingest", "--limit", "1", "--config", str(config_path)]
-    )
-
-    text_path = root / "text" / f"{discovered.hash16}.txt"
     assert result.exit_code == 0
-    assert text_path.read_text(encoding="utf-8") == "hello world"
-    assert "path | validation | extraction | quality | output" in result.output
-    assert "discovered=1 processed=1 written=1 failed=0" in result.output
+    assert calls == [(2, False, True)]
+    assert "summaries_skipped: 2" in result.output
+    assert "warnings: 0" in result.output
 
 
-def test_ingest_moves_invalid_pdf_to_failed(tmp_path: Path, monkeypatch):
+def test_plain_ingest_routes_to_ingest_library_with_ai_mode(
+    tmp_path: Path, monkeypatch
+):
     root = tmp_path / "library"
-    inbox = root / "inbox"
-    inbox.mkdir(parents=True)
+    root.mkdir()
     config_path = tmp_path / "config.toml"
     _write_config(config_path, root)
-    pdf_path = inbox / "bad.pdf"
-    pdf_path.write_bytes(b"broken")
-    discovered = DiscoveredPDF(
-        path=pdf_path,
-        file_hash="b" * 64,
-        hash16="b" * 16,
-        hash8="b" * 8,
-        size_bytes=6,
-        modified_time="2026-04-25T12:34:56Z",
-    )
+    calls = []
 
-    monkeypatch.setattr(
-        "paperlib.cli.discover_pdfs",
-        lambda inbox_path: [discovered],
-    )
-    monkeypatch.setattr(
-        "paperlib.cli.validate_pdf",
-        lambda path: ValidationResult(
-            path=path,
-            ok=False,
-            page_count=None,
-            has_text=False,
-            reason="broken",
-        ),
-    )
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        calls.append((limit, dry_run, no_ai))
+        return IngestReport(
+            discovered=1,
+            processed=1,
+            records_written=1,
+            summaries_generated=1,
+        )
 
-    runner = CliRunner()
-    result = runner.invoke(
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(
         main, ["ingest", "--limit", "1", "--config", str(config_path)]
     )
 
-    failed_path = root / "failed" / "bad.pdf"
     assert result.exit_code == 0
-    assert failed_path.read_bytes() == b"broken"
-    assert not pdf_path.exists()
-    assert "discovered=1 processed=1 written=0 failed=1" in result.output
+    assert calls == [(1, False, False)]
+    assert "records_written: 1" in result.output
+    assert "summaries_generated: 1" in result.output
+
+
+def test_ingest_report_prints_all_fields_and_warnings(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        return IngestReport(
+            discovered=3,
+            processed=2,
+            skipped_existing=1,
+            failed=0,
+            records_written=2,
+            summaries_generated=1,
+            summaries_failed=1,
+            summaries_skipped=0,
+            warnings=["AIError: unavailable"],
+        )
+
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(main, ["ingest", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "discovered: 3" in result.output
+    assert "processed: 2" in result.output
+    assert "skipped_existing: 1" in result.output
+    assert "failed: 0" in result.output
+    assert "records_written: 2" in result.output
+    assert "summaries_generated: 1" in result.output
+    assert "summaries_failed: 1" in result.output
+    assert "summaries_skipped: 0" in result.output
+    assert "warnings: 1" in result.output
+    assert "- AIError: unavailable" in result.output

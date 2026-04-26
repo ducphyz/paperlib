@@ -15,6 +15,7 @@ from paperlib.pipeline.metadata import (
     build_non_ai_metadata_fields,
     extract_non_ai_metadata,
 )
+from paperlib.pipeline.summarise import summarise_record
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
 from paperlib.store.fs import (
@@ -45,7 +46,7 @@ def ingest_library(
     *,
     limit: int | None = None,
     dry_run: bool = False,
-    no_ai: bool = True,
+    no_ai: bool = False,
 ) -> IngestReport:
     if not config.library.root.exists():
         raise FileNotFoundError(
@@ -62,9 +63,6 @@ def ingest_library(
             report.processed += 1
         return report
 
-    if not no_ai:
-        report.warnings.append("AI ingest is not implemented in Phase 5")
-
     ensure_runtime_dirs(config)
     conn = db.connect(config.paths.db)
     db.init_db(conn)
@@ -75,7 +73,7 @@ def ingest_library(
                 if db.file_exists(conn, pdf.file_hash):
                     report.skipped_existing += 1
                     continue
-                _ingest_pdf(config, conn, pdf, report)
+                _ingest_pdf(config, conn, pdf, report, no_ai=no_ai)
             except Exception as exc:
                 report.failed += 1
                 report.warnings.append(f"{pdf.path}: {exc}")
@@ -86,7 +84,12 @@ def ingest_library(
 
 
 def _ingest_pdf(
-    config: AppConfig, conn, pdf: DiscoveredPDF, report: IngestReport
+    config: AppConfig,
+    conn,
+    pdf: DiscoveredPDF,
+    report: IngestReport,
+    *,
+    no_ai: bool,
 ) -> None:
     validation = validate_pdf(pdf.path)
     if not validation.ok:
@@ -142,6 +145,29 @@ def _ingest_pdf(
     move_file(pdf.path, canonical_path)
     atomic_write_text(config.paths.text / f"{pdf.hash16}.txt", cleaned_text)
 
+    if no_ai or not config.ai.enabled:
+        _mark_summary_skipped(record)
+    elif not record.summary.get("locked", False):
+        record, generated, error_message = summarise_record(
+            record,
+            cleaned_text=cleaned_text,
+            source_file_hash=pdf.file_hash,
+            ai_config=config.ai,
+            no_ai=no_ai,
+        )
+        if generated:
+            report.summaries_generated += 1
+        if (
+            error_message is not None
+            and record.status.get("summary") == status_values.SUMMARY_FAILED
+        ):
+            report.summaries_failed += 1
+        if error_message is not None:
+            report.warnings.append(error_message)
+
+    if record.status.get("summary") == status_values.SUMMARY_SKIPPED:
+        report.summaries_skipped += 1
+
     record_path = config.paths.records / f"{record.paper_id}.json"
     write_record_atomic(record_path, record)
 
@@ -152,7 +178,6 @@ def _ingest_pdf(
         f"records/{record.paper_id}.json",
     )
     report.records_written += 1
-    report.summaries_skipped += 1
 
 
 def _build_file_record(
@@ -236,6 +261,13 @@ def _merge_unique(existing: list[str], incoming: list[str]) -> list[str]:
         if value not in merged:
             merged.append(value)
     return merged
+
+
+def _mark_summary_skipped(record: PaperRecord) -> None:
+    if record.summary.get("locked", False):
+        return
+    record.summary["status"] = status_values.SUMMARY_SKIPPED
+    record.status["summary"] = status_values.SUMMARY_SKIPPED
 
 
 def _utc_now() -> str:

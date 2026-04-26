@@ -5,14 +5,10 @@ from pathlib import Path
 import click
 
 from paperlib.config import AppConfig, load_config
-from paperlib.models import status as status_values
-from paperlib.pipeline.clean import clean_text
 from paperlib.pipeline.discover import discover_pdfs
-from paperlib.pipeline.extract import extract_text_from_pdf
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
-from paperlib.store.fs import atomic_write_text, move_to_failed
 
 
 @click.group()
@@ -59,11 +55,6 @@ def validate_config(config_path: str) -> None:
 def ingest(
     dry_run: bool, limit: int | None, no_ai: bool, config_path: str
 ) -> None:
-    if not dry_run and not no_ai and limit is None:
-        raise click.ClickException(
-            "Phase 3 non-dry-run ingest requires --limit N."
-        )
-
     try:
         config = load_config(config_path)
     except Exception as exc:
@@ -85,17 +76,13 @@ def ingest(
         _print_ingest_report(report)
         return
 
-    if no_ai:
-        report = ingest_library(
-            config,
-            limit=limit,
-            dry_run=False,
-            no_ai=True,
-        )
-        _print_ingest_report(report)
-        return
-
-    _run_phase3_ingest(config, limit)
+    report = ingest_library(
+        config,
+        limit=limit,
+        dry_run=False,
+        no_ai=no_ai,
+    )
+    _print_ingest_report(report)
 
 
 @main.command("rebuild-index")
@@ -155,70 +142,13 @@ def _print_ingest_report(report) -> None:
     click.echo(f"skipped_existing: {report.skipped_existing}")
     click.echo(f"failed: {report.failed}")
     click.echo(f"records_written: {report.records_written}")
+    click.echo(f"summaries_generated: {report.summaries_generated}")
+    click.echo(f"summaries_failed: {report.summaries_failed}")
     click.echo(f"summaries_skipped: {report.summaries_skipped}")
+    click.echo(f"warnings: {len(report.warnings)}")
     if report.warnings:
-        click.echo("warnings:")
         for warning in report.warnings:
             click.echo(f"- {warning}")
-
-
-def _run_phase3_ingest(config: AppConfig, limit: int | None) -> None:
-    discovered = discover_pdfs(config.paths.inbox)
-    to_process = discovered[:limit] if limit is not None else discovered
-    _ensure_runtime_paths(config)
-
-    written = 0
-    failed = 0
-
-    click.echo("path | validation | extraction | quality | output")
-    for pdf in to_process:
-        validation = validate_pdf(pdf.path)
-        if not validation.ok:
-            failed_path = move_to_failed(pdf.path, config.paths.failed)
-            failed += 1
-            click.echo(
-                " | ".join(
-                    [
-                        str(pdf.path),
-                        "failed",
-                        "-",
-                        "-",
-                        str(failed_path),
-                    ]
-                )
-            )
-            continue
-
-        extraction = extract_text_from_pdf(
-            pdf.path,
-            min_char_count=config.extraction.min_char_count,
-            min_word_count=config.extraction.min_word_count,
-        )
-        if extraction.status == status_values.EXTRACTION_FAILED:
-            failed += 1
-            output = "-"
-        else:
-            text_path = config.paths.text / f"{pdf.hash16}.txt"
-            atomic_write_text(text_path, clean_text(extraction.raw_text))
-            written += 1
-            output = str(text_path)
-
-        click.echo(
-            " | ".join(
-                [
-                    str(pdf.path),
-                    "ok",
-                    extraction.status,
-                    extraction.quality,
-                    output,
-                ]
-            )
-        )
-
-    click.echo(
-        f"discovered={len(discovered)} processed={len(to_process)} "
-        f"written={written} failed={failed}"
-    )
 
 
 def _print_dry_run_table(pdfs) -> None:
