@@ -1,24 +1,25 @@
 # Architecture
 
-`paperlib` v1 is a local CLI pipeline for turning PDFs into a structured paper
-library. The canonical data is stored as JSON records. SQLite is a rebuildable
-index over those records.
+`paperlib` v1 is a local CLI pipeline for ingesting PDFs into a structured paper
+library. JSON records are the canonical data. SQLite is a rebuildable index over
+those records.
 
 ## High-Level Architecture
 
-- `paperlib.cli` defines the command line interface and handles user output.
-- `paperlib.config` loads `config.toml` and `.env`, resolves library paths, and
-  returns an `AppConfig`.
+- `paperlib.cli` defines the command line interface and owns all user-facing
+  output.
+- `paperlib.config` loads `config.toml` and `.env`, resolves configured paths
+  relative to `library.root`, and returns an `AppConfig`.
 - `paperlib.pipeline` contains the ingest stages: discovery, validation,
   extraction, cleaning, metadata detection, summarisation, and orchestration.
-- `paperlib.store` contains filesystem helpers, atomic JSON persistence, SQLite
-  indexing, and schema migrations.
+- `paperlib.store` contains filesystem helpers, atomic text and JSON writes,
+  SQLite indexing, and schema migrations.
 - `paperlib.ai` contains the Anthropic client wrapper and summary prompt
   construction.
 - `paperlib.models` contains dataclasses for records, files, identity,
   metadata fields, and status constants.
 
-Pipeline modules return data. CLI printing stays in `cli.py`.
+Pipeline modules return data. CLI printing stays in `paperlib.cli`.
 
 ## Runtime Layout
 
@@ -36,33 +37,36 @@ Given a configured `library.root`, v1 uses this layout:
 └── duplicates/
 ```
 
-`inbox/` is the input queue. Valid ingested PDFs are moved under `papers/`.
-Extracted text goes under `text/`. Canonical records go under `records/`.
-SQLite lives at `db/library.db`. Invalid PDFs are moved to `failed/`.
+- `inbox/` contains PDFs waiting for ingest.
+- `papers/{year}/...` contains ingested PDFs with canonical filenames.
+- `records/{paper_id}.json` contains canonical JSON records.
+- `text/{hash16}.txt` contains cleaned extracted text.
+- `db/library.db` contains the SQLite index.
+- `logs/` is reserved for runtime logs.
+- `failed/` receives invalid or unreadable PDFs.
+- `duplicates/` is part of the runtime layout for duplicate handling.
 
 ## Source of Truth
 
-JSON records are canonical.
-
-SQLite is an index. It can be deleted and rebuilt from `records/*.json` with:
+JSON records are canonical. SQLite can be deleted and rebuilt from
+`records/*.json`:
 
 ```bash
 paperlib rebuild-index
 ```
 
-On conflict, JSON is the authoritative representation.
+On conflict, the JSON record is authoritative.
 
-## Identity
+## Paper IDs
 
-The internal `paper_id` is assigned from the first file used to create the
-record:
+The internal `paper_id` is assigned from the first file used to create a record:
 
 ```text
 p_{sha256_of_first_file[:16]}
 ```
 
-The `paper_id` is stable and never changes, even if later aliases or duplicate
-files are attached to the same record.
+The `paper_id` is stable and never changes, even if later files or aliases are
+attached to the same record.
 
 ## Aliases
 
@@ -74,31 +78,31 @@ arxiv:<id>
 doi:<doi>
 ```
 
-Every file contributes a `hash:<hash16>` alias. DOI and arXiv aliases are added
-when detected. During ingest, non-hash aliases can resolve a new file to an
-existing paper record.
+Each ingested file contributes a `hash:<hash16>` alias. DOI and arXiv aliases
+are added when detected. During ingest, non-hash aliases can resolve a new file
+to an existing paper record.
 
 ## Ingest State Machine
 
 For each PDF selected from `inbox/`:
 
-1. Discover PDF path, size, modified time, and SHA-256 hash.
+1. Discover the PDF path, size, modified time, and SHA-256 hash.
 2. Deduplicate exact files by checking the SQLite `files` table.
 3. Validate readability and sampled text presence.
 4. Extract full text with `pdfplumber`.
 5. Clean extracted text.
 6. Identify DOI, arXiv ID, aliases, and target `paper_id`.
-7. Decide canonical PDF filename.
+7. Decide the canonical filename.
 8. Move the PDF to `papers/{year}/`.
 9. Write cleaned text to `text/{hash16}.txt`.
-10. Build non-AI metadata fields.
+10. Build deterministic metadata fields.
 11. Optionally summarise with AI.
 12. Write the JSON record.
 13. Update SQLite in a transaction.
 14. Log the processing run.
 
-Dry runs stop at discovery and validation and do not write files, move PDFs,
-update SQLite, or call AI.
+Dry runs stop at discovery and validation. They do not move PDFs, write text,
+write JSON, update SQLite, or call AI.
 
 ## Canonical Filenames
 
@@ -115,32 +119,30 @@ papers/{year}/
 ```
 
 If the year is unknown, `unknown_year` is used. If the first author is unknown,
-`unknown_author` is used. These placeholders are filename components only; they
-are not metadata values.
+`unknown_author` is used. These fallbacks are filename components only; unknown
+metadata values remain `null`.
 
 ## AI Rules
 
-AI summarisation is optional. `paperlib ingest --no-ai` avoids AI completely.
-When AI is enabled, ingest attempts to use Anthropic for metadata and summary
-generation.
+AI summarisation is optional. `paperlib ingest --no-ai` avoids AI entirely.
+Without `--no-ai`, ingest attempts AI only when `ai.enabled = true`.
 
-AI failures do not stop ingest. The record is still written with a failed
-summary status where appropriate.
+AI failures do not stop ingest. The record is still written, and the summary
+status is marked failed for the affected record.
 
-AI never overwrites locked metadata or locked summary fields. AI also never
-overwrites `metadata.year`; year comes only from deterministic non-AI heuristics.
+AI never overwrites locked metadata or locked summaries. AI also never
+overwrites `metadata.year`; year is set only by deterministic non-AI detection.
 
 ## Atomicity
 
 Text and JSON writes use a temporary file, `fsync`, and atomic rename.
 
-SQLite updates use transactions for ingest success and rebuild-index indexing.
-This keeps the JSON source of truth and the SQLite index recoverable after
-interrupted writes.
+SQLite updates use transactions for successful ingest and index rebuilds. This
+keeps JSON canonical and makes the SQLite index recoverable.
 
-## Design Limitations
+## Limitations by Design
 
-v1 intentionally does not implement:
+v1 does not implement:
 
 - OCR
 - external metadata APIs

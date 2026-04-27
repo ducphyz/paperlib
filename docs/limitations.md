@@ -2,28 +2,79 @@
 
 These are v1 design limits, not runtime errors.
 
-## PDF Text Only
+## No OCR
 
-`paperlib` extracts text with `pdfplumber`. It does not perform OCR. Scanned
-PDFs or image-only pages may be rejected during validation or classified as
-low-quality extraction.
+`paperlib` does not perform OCR.
 
-## No External Metadata APIs
+Scanned PDFs and image-only pages will have low or zero text extraction. They
+may be rejected during validation, moved to `failed/`, or classified with
+low-quality extraction such as `scanned` or `low_text`.
 
-v1 does not call Crossref, the arXiv API, Semantic Scholar, or other external
-metadata services. DOI and arXiv IDs are detected with regular expressions from
-the filename and extracted text.
+## PDF Text Extraction
 
-## Conservative Metadata
+Text extraction uses `pdfplumber` and depends on the text layer embedded in the
+PDF.
 
-Unknown metadata is stored as `null`. `paperlib` must not fabricate title,
-author, journal, year, DOI, or arXiv values.
+Known limitations:
 
-AI can fill selected fields and summaries, but it never overwrites locked fields
-and never overwrites `metadata.year`.
+- equations may extract poorly
+- multi-column layouts may be imperfect
+- symbols may be missing or distorted
+- ligatures are normalized where possible, but may still be imperfect
 
-## No Search/RAG Layer
+## Metadata
 
-v1 does not implement embeddings, chunking, vector search, RAG, or a GUI.
+DOI and arXiv detection is regex-based. It can miss identifiers or capture only
+the first detected match.
 
-The SQLite database is an operational index, not a semantic search system.
+In v1, `title`, `authors`, and `journal` require AI to be populated. Without AI,
+these fields remain `null` unless manually edited.
+
+v1 does not call Crossref, the arXiv API, Semantic Scholar, or any other
+external metadata lookup service.
+
+The year heuristic is conservative. It may return `null` rather than risk a
+false positive.
+
+## AI
+
+AI output may fail JSON parsing or validation. When that happens, the affected
+summary is marked `failed` and ingest continues.
+
+AI may return `null` for unknown fields. This is expected and preferable to
+fabricating metadata.
+
+AI output should not be treated as authoritative without review. Use locked
+fields to protect reviewed metadata or summaries.
+
+AI never overwrites locked metadata fields or locked summaries. AI also does
+not set or overwrite `metadata.year`.
+
+## Duplicates
+
+Exact duplicates are detected by full file hash.
+
+Paper-level alias duplicates are detected by DOI or arXiv ID.
+
+v1 does not implement fuzzy duplicate detection. Similar PDFs without matching
+hashes, DOI, or arXiv IDs may become separate records.
+
+## Search and RAG
+
+v1 does not implement:
+
+- embeddings
+- chunking
+- semantic search
+- question-answering over papers
+
+SQLite is an operational index, not a semantic search system.
+
+## Operations
+
+`paperlib` is local filesystem oriented.
+
+v1 does not include:
+
+- a multi-user permission system
+- a GUI

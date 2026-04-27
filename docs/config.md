@@ -1,7 +1,7 @@
 # Configuration
 
-`paperlib` loads configuration from `config.toml` and environment variables
-from `.env`.
+`paperlib` loads settings from `config.toml` and reads environment variables
+from `.env` next to that config file.
 
 Create local files:
 
@@ -10,24 +10,12 @@ cp config.example.toml config.toml
 cp .env.example .env
 ```
 
-## Required Library Root
-
-`library.root` must point to an existing directory:
+## config.toml Structure
 
 ```toml
 [library]
 root = "/Users/you/PaperLibrary"
-```
 
-`paperlib validate-config` does not create `library.root`; this prevents typos
-from silently creating a new library. It does create missing runtime
-subdirectories under the root.
-
-## Paths
-
-Path values are resolved relative to `library.root` unless absolute:
-
-```toml
 [paths]
 inbox = "inbox"
 papers = "papers"
@@ -37,33 +25,17 @@ db = "db/library.db"
 logs = "logs"
 failed = "failed"
 duplicates = "duplicates"
-```
 
-## Pipeline
-
-```toml
 [pipeline]
 move_after_ingest = true
 skip_existing = true
 dry_run_default = false
-```
 
-Existing files are skipped by hash when already indexed in SQLite.
-
-## Extraction
-
-```toml
 [extraction]
 engine = "pdfplumber"
 min_char_count = 500
 min_word_count = 100
-```
 
-`pdfplumber` is the implemented extraction engine.
-
-## AI
-
-```toml
 [ai]
 enabled = true
 provider = "anthropic"
@@ -72,11 +44,131 @@ max_tokens = 1200
 temperature = 0.2
 ```
 
-Set `ANTHROPIC_API_KEY` in `.env` only when using AI:
+## Keys
+
+`library.root`
+
+The existing root directory for the paper library. `validate-config` requires
+this directory to already exist.
+
+`paths.inbox`
+
+Directory scanned for incoming PDFs.
+
+`paths.papers`
+
+Directory where ingested PDFs are moved using canonical filenames.
+
+`paths.records`
+
+Directory where canonical JSON records are written.
+
+`paths.text`
+
+Directory where cleaned extracted text files are written.
+
+`paths.db`
+
+SQLite database path.
+
+`paths.logs`
+
+Runtime log directory.
+
+`paths.failed`
+
+Directory where invalid or unreadable PDFs are moved.
+
+`paths.duplicates`
+
+Runtime directory reserved for duplicate handling.
+
+`pipeline.move_after_ingest`
+
+Configured pipeline flag for moving PDFs after ingest. v1 ingest moves valid
+PDFs to their canonical location.
+
+`pipeline.skip_existing`
+
+Configured pipeline flag for skipping existing files. v1 deduplicates exact
+files by checking whether the file hash is already indexed in SQLite.
+
+`pipeline.dry_run_default`
+
+Configured default dry-run flag. The CLI currently uses the explicit
+`--dry-run` option for dry runs.
+
+`extraction.engine`
+
+Extraction engine name. The implemented engine is `pdfplumber`.
+
+`extraction.min_char_count`
+
+Minimum character count used when classifying extraction quality.
+
+`extraction.min_word_count`
+
+Minimum word count used when classifying extraction quality.
+
+`ai.enabled`
+
+Enables AI summarization for plain `paperlib ingest` when set to `true`.
+
+`ai.provider`
+
+AI provider name. v1 implements Anthropic only.
+
+`ai.model`
+
+Anthropic model name used for AI summaries.
+
+`ai.max_tokens`
+
+Maximum tokens requested from the Anthropic API.
+
+`ai.temperature`
+
+Temperature passed to the Anthropic API.
+
+## .env
+
+`.env` may define:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=...
 ```
 
-`paperlib ingest --no-ai` does not require an API key. Non-AI commands still
-work when the key is missing.
+Set `ANTHROPIC_API_KEY` only if using AI summaries. Do not commit real API keys.
+
+## validate-config Behavior
+
+`paperlib validate-config`:
+
+- loads `config.toml` and `.env`
+- requires `library.root` to already exist
+- exits with an error if `library.root` is missing
+- creates missing runtime subdirectories under `library.root`
+- prints a path status table
+- warns, but does not fail, if `ai.enabled = true` and `ANTHROPIC_API_KEY` is
+  missing
+
+`validate-config` does not create `library.root`. This prevents a typo in the
+root path from silently creating a new library.
+
+## Path Resolution
+
+Relative path values in `[paths]` are resolved under `library.root`. Absolute
+path values remain absolute.
+
+The loaded `AppConfig` stores resolved `pathlib.Path` objects for
+`library.root` and all configured paths.
+
+## AI Key Behavior
+
+`paperlib ingest --no-ai` does not require `ANTHROPIC_API_KEY`.
+
+If `ai.enabled = false`, ingest does not require `ANTHROPIC_API_KEY`.
+
+Plain `paperlib ingest` attempts AI summarization when `ai.enabled = true`. If
+the key is missing, affected summaries fail, records are still written, and
+non-AI commands continue to work.

@@ -1,18 +1,70 @@
 # Roadmap
 
-This roadmap lists possible post-v1 work. These features are not implemented in
-v1.
+This roadmap lists possible post-v1 work. These are future ideas, not features
+implemented in v1.
 
-Potential future additions:
+## OCR
 
-- OCR for scanned PDFs.
-- Crossref and arXiv API metadata lookup.
-- Semantic Scholar lookup.
-- Fuzzy duplicate detection.
-- Search over records and extracted text.
-- Embeddings and RAG workflows.
-- A graphical or web interface.
+Possible future OCR work:
 
-v1 remains focused on local PDF ingest, deterministic metadata extraction,
-canonical JSON records, a rebuildable SQLite index, and optional Anthropic
-summaries.
+- scanned PDF support
+- OCR quality metrics
+- review status for OCR confidence problems
+
+## External Metadata
+
+Possible future metadata integrations:
+
+- Crossref lookup
+- arXiv API lookup
+- Semantic Scholar lookup
+
+These would supplement, not replace, the canonical JSON record model.
+
+## Better Duplicate Detection
+
+Possible future duplicate handling:
+
+- fuzzy title matching
+- DOI and arXiv reconciliation across conflicting records
+- manual merge command
+
+## Search
+
+Possible future search features:
+
+- keyword search over metadata and summaries
+- full-text search over extracted text
+
+## RAG
+
+Possible future RAG work:
+
+- text chunking
+- embeddings
+- vector index
+- cited answers
+
+## UI
+
+Possible future interfaces:
+
+- terminal UI
+- simple web UI
+- manual review and editing workflow
+
+## Export
+
+Possible future export formats:
+
+- BibTeX
+- Markdown
+- CSV
+
+## Safety
+
+Possible future safety tools:
+
+- richer schema migrations
+- backup tools
+- validation command for records and library consistency

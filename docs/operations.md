@@ -1,10 +1,10 @@
 # Operations
 
-This guide covers day-to-day `paperlib` v1 usage.
+This guide covers practical `paperlib` v1 usage.
 
 ## First Setup
 
-Create a library root directory:
+Create the library root:
 
 ```bash
 mkdir -p ~/PaperLibrary
@@ -17,22 +17,22 @@ cp config.example.toml config.toml
 cp .env.example .env
 ```
 
-Edit `config.toml` and set `library.root` to the library root:
+Edit `config.toml` and set `library.root`:
 
 ```toml
 [library]
 root = "/Users/you/PaperLibrary"
 ```
 
-Validate the config and create runtime subdirectories:
+Validate the config:
 
 ```bash
 paperlib validate-config
 ```
 
 `library.root` must already exist. `validate-config` creates missing runtime
-paths such as `inbox/`, `records/`, `text/`, `papers/`, `db/`, `logs/`,
-`failed/`, and `duplicates/`.
+subdirectories such as `inbox/`, `papers/`, `records/`, `text/`, `db/`,
+`logs/`, `failed/`, and `duplicates/`.
 
 ## Normal Non-AI Ingest
 
@@ -49,13 +49,13 @@ calling AI:
 paperlib ingest --dry-run
 ```
 
-Run the ingest without AI:
+Run ingest without AI:
 
 ```bash
 paperlib ingest --no-ai
 ```
 
-Check the resulting library:
+Check the library:
 
 ```bash
 paperlib status
@@ -63,7 +63,7 @@ paperlib list
 paperlib show <paper_id>
 ```
 
-`show` also accepts aliases such as:
+`show` also accepts stored aliases:
 
 ```bash
 paperlib show arxiv:2401.12345
@@ -73,10 +73,10 @@ paperlib show hash:<hash16>
 
 ## AI Ingest
 
-To use AI summaries, set an Anthropic API key in `.env`:
+Set an Anthropic API key in `.env`:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=...
 ```
 
 Enable AI in `config.toml`:
@@ -92,12 +92,12 @@ Run ingest without `--no-ai`:
 paperlib ingest
 ```
 
-Summary status values:
+Summary statuses:
 
 - `generated`: AI summary was generated and stored.
-- `failed`: AI was attempted but failed; ingest still wrote the record.
-- `skipped`: AI was not used, usually because `--no-ai` was passed, AI was
-  disabled, or the summary was locked.
+- `failed`: AI was attempted but failed; ingest continued and wrote the record.
+- `skipped`: AI was not used because `--no-ai` was passed, AI was disabled, or
+  the summary was locked.
 
 ## Rebuild SQLite
 
@@ -108,15 +108,15 @@ recreated after manual JSON edits:
 paperlib rebuild-index
 ```
 
-If the database already exists, `paperlib` first writes a timestamped backup
-next to it, then rebuilds the index from `records/*.json`.
+If the database already exists, `paperlib` writes a timestamped backup next to
+it before rebuilding.
 
-JSON remains the source of truth. SQLite can be deleted and recreated from the
-JSON records.
+JSON records remain the source of truth. SQLite is rebuilt from
+`records/*.json`.
 
 ## Manual Record Editing
 
-Manual edits should be made in:
+Manual edits are made in:
 
 ```text
 records/{paper_id}.json
@@ -125,11 +125,10 @@ records/{paper_id}.json
 Edit carefully:
 
 - Preserve `schema_version`.
-- Keep valid JSON.
-- Use `locked: true` on metadata or summary fields that should not be changed
-  by later AI runs.
-- Do not replace unknown metadata with placeholder strings; keep unknown values
-  as `null`.
+- Keep the file valid JSON.
+- Use `locked: true` on metadata fields or summaries that should not be
+  overwritten by later automated runs.
+- Keep unknown metadata values as `null`.
 
 After manual JSON changes, rebuild SQLite:
 
@@ -145,8 +144,8 @@ Invalid, unreadable, or broken PDFs are moved to:
 failed/
 ```
 
-Inspect these files manually. If a file can be fixed, move it back into
-`inbox/` and run the ingest flow again:
+Inspect failed files manually. If a file can be fixed, move it back to
+`inbox/` and run the normal ingest flow again:
 
 ```bash
 mv ~/PaperLibrary/failed/example.pdf ~/PaperLibrary/inbox/
@@ -156,7 +155,7 @@ paperlib ingest --no-ai
 
 ## Duplicate Behavior
 
-Exact duplicate files are detected by full SHA-256 hash. If a file hash already
+Exact duplicate files are detected by full SHA-256 hash. If the hash already
 exists in SQLite, the file is skipped.
 
 DOI and arXiv aliases are used for paper-level duplicate detection. If a new
@@ -165,20 +164,22 @@ that same record instead of creating a new paper.
 
 ## Safe Workflow
 
-For each new batch:
+Always run a dry run first on a new batch:
 
 ```bash
 paperlib ingest --dry-run
+```
+
+Start with a small limited ingest when testing a new library, config, or batch:
+
+```bash
 paperlib ingest --limit 3 --no-ai
 paperlib status
 paperlib list
 ```
 
-After the small test batch looks right, run the full ingest:
+After the small batch looks right, run the full non-AI ingest:
 
 ```bash
 paperlib ingest --no-ai
 ```
-
-Use `--limit N` whenever testing a new library, config, or batch of unfamiliar
-PDFs.
