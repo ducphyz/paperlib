@@ -35,7 +35,49 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+_LATIN_MAP = str.maketrans(
+    {
+        # Scandinavian
+        "ø": "o",
+        "Ø": "O",
+        "æ": "ae",
+        "Æ": "Ae",
+        "å": "a",
+        "Å": "A",
+        # Polish / Baltic
+        "ł": "l",
+        "Ł": "L",
+        # Icelandic / Old English
+        "ð": "d",
+        "Ð": "D",
+        "þ": "th",
+        "Þ": "Th",
+        # German sharp s
+        "ß": "ss",
+        # Dotless i / dotted capital I
+        "ı": "i",
+        "İ": "I",
+    }
+)
+_SURNAME_PARTICLES = {
+    "da",
+    "de",
+    "den",
+    "der",
+    "di",
+    "du",
+    "la",
+    "le",
+    "ten",
+    "ter",
+    "van",
+    "von",
+}
+_NAME_SUFFIXES = {"jr", "junior", "sr", "senior", "ii", "iii", "iv"}
+
+
 def ascii_fold(s: str) -> str:
+    s = s.translate(_LATIN_MAP)
     return unicodedata.normalize("NFKD", s).encode(
         "ascii", "ignore"
     ).decode("ascii")
@@ -55,6 +97,33 @@ def sanitize_component(s: str, max_len: int = 40) -> str:
     return sanitized
 
 
+def filename_author_component(first_author: str | None) -> str | None:
+    if not first_author or not first_author.strip():
+        return None
+
+    tokens = [
+        token.strip()
+        for token in re.split(r"\s+", first_author.strip())
+        if token.strip()
+    ]
+    if not tokens:
+        return None
+
+    while len(tokens) > 1 and _name_token_key(tokens[-1]) in _NAME_SUFFIXES:
+        tokens.pop()
+    if not tokens:
+        return None
+
+    surname_tokens = [tokens[-1]]
+    index = len(tokens) - 2
+    while index >= 0 and _name_token_key(tokens[index]) in _SURNAME_PARTICLES:
+        surname_tokens.insert(0, tokens[index])
+        index -= 1
+
+    component = sanitize_component(" ".join(surname_tokens))
+    return component or None
+
+
 def canonical_pdf_relative_path(
     *,
     year: int | None,
@@ -62,16 +131,18 @@ def canonical_pdf_relative_path(
     file_hash: str,
 ) -> str:
     year_component = str(year) if year is not None else "unknown_year"
-    author_component = (
-        sanitize_component(first_author) if first_author is not None else ""
-    )
+    author_component = filename_author_component(first_author) or ""
     if not author_component:
         author_component = "unknown_author"
 
     hash8 = file_hash[:8]
-    filename = f"{year_component}_{author_component}_{hash8}.pdf"
+    filename = f"{author_component}_{year_component}_{hash8}.pdf"
     directory = f"papers/{year_component}"
     return f"{directory}/{filename}"
+
+
+def _name_token_key(token: str) -> str:
+    return sanitize_component(token).replace("_", "")
 
 
 def atomic_write_text(path: Path, text: str) -> None:

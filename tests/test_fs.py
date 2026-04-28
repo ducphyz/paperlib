@@ -6,6 +6,7 @@ from paperlib.store.fs import (
     ascii_fold,
     atomic_write_text,
     canonical_pdf_relative_path,
+    filename_author_component,
     move_file,
     move_to_duplicates,
     move_to_failed,
@@ -37,6 +38,42 @@ def test_sanitize_component_folds_lowercases_and_replaces_separators():
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Müller", "muller"),
+        ("Bøttcher", "bottcher"),
+        ("Łukasiewicz", "lukasiewicz"),
+        ("Dvořák", "dvorak"),
+        ("Ångström", "angstrom"),
+        ("Þórsson", "thorsson"),
+        ("Ægir", "aegir"),
+        ("Straße", "strasse"),
+        ("Dıaz", "diaz"),
+        ("İstanbul", "istanbul"),
+    ],
+)
+def test_sanitize_component_non_ascii_latin(name, expected):
+    assert sanitize_component(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("C. G. L. Bøttcher", "bottcher"),
+        ("C G L Bottcher", "bottcher"),
+        ("Bøttcher", "bottcher"),
+        ("John Smith", "smith"),
+        ("A. J. van der Waals", "van_der_waals"),
+        ("Maria del Carmen García", "garcia"),
+        ("Jean-Luc Picard", "picard"),
+        ("", None),
+    ],
+)
+def test_filename_author_component_uses_surname(name, expected):
+    assert filename_author_component(name) == expected
+
+
 def test_sanitize_component_removes_dots_and_other_punctuation():
     assert sanitize_component("Smith Jr.") == "smith_jr"
     assert sanitize_component("A+B=C!") == "abc"
@@ -66,7 +103,7 @@ def test_canonical_pdf_relative_path_with_known_year_and_author():
         year=2024,
         first_author="Smith",
         file_hash="abcdef1234567890",
-    ) == "papers/2024/2024_smith_abcdef12.pdf"
+    ) == "papers/2024/smith_2024_abcdef12.pdf"
 
 
 def test_canonical_pdf_relative_path_with_unknown_components():
@@ -76,7 +113,7 @@ def test_canonical_pdf_relative_path_with_unknown_components():
         file_hash="abcdef1234567890",
     ) == (
         "papers/unknown_year/"
-        "unknown_year_unknown_author_abcdef12.pdf"
+        "unknown_author_unknown_year_abcdef12.pdf"
     )
 
 
@@ -87,8 +124,16 @@ def test_canonical_pdf_relative_path_sanitizes_author_and_returns_string():
         file_hash="abcdef1234567890",
     )
 
-    assert value == "papers/2024/2024_muller_abcdef12.pdf"
+    assert value == "papers/2024/muller_2024_abcdef12.pdf"
     assert isinstance(value, str)
+
+
+def test_canonical_pdf_relative_path_uses_author_surname_only():
+    assert canonical_pdf_relative_path(
+        year=2024,
+        first_author="C. G. L. Bøttcher",
+        file_hash="0440c911081cc43b",
+    ) == "papers/2024/bottcher_2024_0440c911.pdf"
 
 
 def test_canonical_pdf_relative_path_empty_author_uses_fallback():
@@ -96,7 +141,7 @@ def test_canonical_pdf_relative_path_empty_author_uses_fallback():
         year=2024,
         first_author="",
         file_hash="abcdef1234567890",
-    ) == "papers/2024/2024_unknown_author_abcdef12.pdf"
+    ) == "papers/2024/unknown_author_2024_abcdef12.pdf"
 
 
 def test_canonical_pdf_relative_path_sanitizes_author_separators():
@@ -104,7 +149,7 @@ def test_canonical_pdf_relative_path_sanitizes_author_separators():
         year=2024,
         first_author="Cao/Chen:Wang",
         file_hash="abcdef1234567890",
-    ) == "papers/2024/2024_cao_chen_wang_abcdef12.pdf"
+    ) == "papers/2024/cao_chen_wang_2024_abcdef12.pdf"
 
 
 def test_atomic_write_text_writes_expected_utf8_content(tmp_path: Path):

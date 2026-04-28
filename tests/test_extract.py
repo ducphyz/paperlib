@@ -18,8 +18,9 @@ class FakePage:
 
 
 class FakePDF:
-    def __init__(self, pages: list[FakePage]):
+    def __init__(self, pages: list[FakePage], metadata: dict | None = None):
         self.pages = pages
+        self.metadata = metadata
 
     def __enter__(self) -> "FakePDF":
         return self
@@ -28,8 +29,14 @@ class FakePDF:
         return None
 
 
-def _mock_pdf(monkeypatch: pytest.MonkeyPatch, pages: list[FakePage]) -> None:
-    monkeypatch.setattr(extract.pdfplumber, "open", lambda _: FakePDF(pages))
+def _mock_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+    pages: list[FakePage],
+    metadata: dict | None = None,
+) -> None:
+    monkeypatch.setattr(
+        extract.pdfplumber, "open", lambda _: FakePDF(pages, metadata)
+    )
 
 
 def test_extract_text_success_multiple_pages(monkeypatch: pytest.MonkeyPatch):
@@ -50,6 +57,32 @@ def test_extract_text_success_multiple_pages(monkeypatch: pytest.MonkeyPatch):
     assert result.char_count == len(result.raw_text)
     assert result.word_count == len(result.raw_text.split())
     assert result.quality == status.QUALITY_GOOD
+
+
+def test_extract_text_captures_embedded_pdf_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _mock_pdf(
+        monkeypatch,
+        [FakePage("alpha beta gamma")],
+        metadata={
+            "/Title": "  Microwave Response  ",
+            "/Author": "A. Smith; B. Jones",
+            "/CreationDate": "D:20140301000000Z",
+            "Ignored": object(),
+        },
+    )
+
+    result = extract.extract_text_from_pdf(
+        Path("paper.pdf"), min_char_count=1, min_word_count=1
+    )
+
+    assert result.embedded_metadata == {
+        "title": "Microwave Response",
+        "authors": "A. Smith; B. Jones",
+        "year": 2014,
+        "creation_date": "D:20140301000000Z",
+    }
 
 
 def test_extract_text_word_count_zero_is_scanned(

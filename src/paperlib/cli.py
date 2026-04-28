@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import click
 
 from paperlib.config import AppConfig, load_config
+from paperlib.logging_config import setup_logging
 from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import validate_pdf
@@ -53,9 +55,14 @@ def validate_config(config_path: str) -> None:
 @click.option("--dry-run", is_flag=True)
 @click.option("--limit", type=int, default=None)
 @click.option("--no-ai", is_flag=True)
+@click.option("--debug", is_flag=True)
 @click.option("--config", "config_path", default="config.toml", show_default=True)
 def ingest(
-    dry_run: bool, limit: int | None, no_ai: bool, config_path: str
+    dry_run: bool,
+    limit: int | None,
+    no_ai: bool,
+    debug: bool,
+    config_path: str,
 ) -> None:
     try:
         config = load_config(config_path)
@@ -63,6 +70,8 @@ def ingest(
         raise click.ClickException(str(exc)) from exc
 
     _require_library_root(config)
+    logger = _setup_command_logging(config, debug=debug)
+    logger.info("config loaded: %s", config_path)
 
     if dry_run:
         discovered = discover_pdfs(config.paths.inbox)
@@ -88,19 +97,60 @@ def ingest(
 
 
 @main.command("rebuild-index")
+@click.option("--dry-run", is_flag=True)
+@click.option("--no-backfill", is_flag=True)
+@click.option("--debug", is_flag=True)
 @click.option("--config", "config_path", default="config.toml", show_default=True)
-def rebuild_index(config_path: str) -> None:
+def rebuild_index(
+    dry_run: bool,
+    no_backfill: bool,
+    debug: bool,
+    config_path: str,
+) -> None:
     try:
         config = load_config(config_path)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
     _require_library_root(config)
-    result = db.rebuild_index_from_records(config.paths.db, config.paths.records)
+    logger = _setup_command_logging(config, debug=debug)
+    logger.info("config loaded: %s", config_path)
+    logger.info(
+        "rebuild-index started: dry_run=%s backfill_handles=%s",
+        dry_run,
+        not no_backfill,
+    )
+    result = db.rebuild_index_from_records(
+        config.paths.db,
+        config.paths.records,
+        dry_run=dry_run,
+        backfill_handles=not no_backfill,
+    )
+    logger.info(
+        "rebuild-index finished: records_loaded=%s records_skipped=%s "
+        "json_errors=%s handles_added=%s duplicate_handles_repaired=%s",
+        result["records_loaded"],
+        result["records_skipped"],
+        result["json_errors"],
+        result["handles_added"],
+        result["duplicate_handles_repaired"],
+    )
 
     click.echo(f"records loaded: {result['records_loaded']}")
     click.echo(f"records skipped: {result['records_skipped']}")
     click.echo(f"JSON errors encountered: {result['json_errors']}")
+    if dry_run:
+        click.echo(f"{result['handles_added']} records would receive handle_id")
+        click.echo(
+            f"{result['duplicate_handles_repaired']} duplicate handle_id "
+            "would be repaired"
+        )
+    else:
+        click.echo(f"handle IDs added: {result['handles_added']}")
+        click.echo(
+            "duplicate handle IDs repaired: "
+            f"{result['duplicate_handles_repaired']}"
+        )
     if result["backup_path"] is not None:
         click.echo(f"backup: {result['backup_path']}")
 
@@ -155,9 +205,10 @@ def show(id_or_alias: str, config_path: str) -> None:
 
     conn = db.connect(db_path)
     try:
-        paper_id = db.resolve_id(conn, id_or_alias)
-        if paper_id is None:
-            raise click.ClickException(f"Paper not found: {id_or_alias}")
+        try:
+            paper_id = db.resolve_id(conn, id_or_alias)
+        except db.IdNotFound as exc:
+            raise click.ClickException(str(exc)) from exc
         record_path_value = db.get_record_path(conn, paper_id)
     finally:
         conn.close()
@@ -174,13 +225,25 @@ def show(id_or_alias: str, config_path: str) -> None:
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
-    click.echo(json.dumps(record, indent=2, ensure_ascii=False))
+    click.echo(
+        json.dumps(_format_show_record(record), indent=2, ensure_ascii=False)
+    )
 
 
 @main.command("list")
 @click.option("--needs-review", is_flag=True)
+@click.option("--no-handle", is_flag=True)
+@click.option(
+    "--sort",
+    "sort_by",
+    type=click.Choice(["year", "handle"]),
+    default="year",
+    show_default=True,
+)
 @click.option("--config", "config_path", default="config.toml", show_default=True)
-def list_command(needs_review: bool, config_path: str) -> None:
+def list_command(
+    needs_review: bool, no_handle: bool, sort_by: str, config_path: str
+) -> None:
     try:
         config = load_config(config_path)
     except Exception as exc:
@@ -194,27 +257,25 @@ def list_command(needs_review: bool, config_path: str) -> None:
 
     conn = db.connect(db_path)
     try:
-        rows = db.list_papers(conn, needs_review=needs_review)
+        rows = db.list_papers(conn, needs_review=needs_review, sort=sort_by)
     finally:
         conn.close()
 
-    click.echo(
-        " | ".join(
-            ["paper_id", "year", "first_author", "title", "review_status"]
-        )
-    )
+    columns = ["paper_id", "year", "first_author", "title", "review_status"]
+    if not no_handle:
+        columns.insert(0, "handle_id")
+    click.echo(" | ".join(columns))
     for row in rows:
-        click.echo(
-            " | ".join(
-                [
-                    row["paper_id"],
-                    _format_year(row.get("year")),
-                    _first_author(row.get("authors_json")),
-                    _truncate_title(row.get("title")),
-                    row.get("review_status") or "",
-                ]
-            )
-        )
+        values = [
+            row["paper_id"],
+            _format_year(row.get("year")),
+            _first_author(row.get("authors_json")),
+            _truncate_title(row.get("title")),
+            row.get("review_status") or "",
+        ]
+        if not no_handle:
+            values.insert(0, row.get("handle_id") or "<none>")
+        click.echo(" | ".join(values))
 
 
 def _print_ingest_report(report) -> None:
@@ -233,8 +294,25 @@ def _print_ingest_report(report) -> None:
             click.echo(f"- {warning}")
 
 
+def _setup_command_logging(config: AppConfig, *, debug: bool) -> logging.Logger:
+    logger = setup_logging(config.paths.logs, debug=debug)
+    logger.debug("debug logging enabled")
+    return logger
+
+
 def _format_year(value) -> str:
     return "<unknown>" if value is None else str(value)
+
+
+def _format_show_record(record: dict) -> dict:
+    formatted = {
+        "handle_id": record.get("handle_id"),
+        "paper_id": record.get("paper_id"),
+    }
+    for key, value in record.items():
+        if key not in formatted:
+            formatted[key] = value
+    return formatted
 
 
 def _first_author(authors_json) -> str:

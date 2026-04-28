@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pdfplumber
@@ -20,6 +21,7 @@ class ExtractionResult:
     quality: str
     warnings: list[str]
     raw_text: str
+    embedded_metadata: dict[str, str | int | None] = field(default_factory=dict)
 
 
 def extract_text_from_pdf(
@@ -32,6 +34,7 @@ def extract_text_from_pdf(
     try:
         with pdfplumber.open(path) as pdf:
             page_count = len(pdf.pages)
+            embedded_metadata = _extract_embedded_metadata(_read_metadata(pdf))
             page_texts = []
             failed_pages = 0
 
@@ -53,6 +56,7 @@ def extract_text_from_pdf(
                     page_count=page_count,
                     warnings=warnings or ["all page extraction failed"],
                     raw_text=raw_text,
+                    embedded_metadata=embedded_metadata,
                     min_char_count=min_char_count,
                     min_word_count=min_word_count,
                 )
@@ -71,6 +75,7 @@ def extract_text_from_pdf(
                 page_count=page_count,
                 warnings=warnings,
                 raw_text=raw_text,
+                embedded_metadata=embedded_metadata,
                 min_char_count=min_char_count,
                 min_word_count=min_word_count,
             )
@@ -83,6 +88,7 @@ def extract_text_from_pdf(
             page_count=0,
             warnings=[f"pdfplumber failed: {exc}"],
             raw_text="",
+            embedded_metadata={},
             min_char_count=min_char_count,
             min_word_count=min_word_count,
         )
@@ -99,6 +105,7 @@ def _result(
     raw_text: str,
     min_char_count: int,
     min_word_count: int,
+    embedded_metadata: dict[str, str | int | None] | None = None,
 ) -> ExtractionResult:
     char_count = len(raw_text)
     word_count = len(raw_text.split())
@@ -119,7 +126,58 @@ def _result(
         ),
         warnings=list(warnings),
         raw_text=raw_text,
+        embedded_metadata=dict(embedded_metadata or {}),
     )
+
+
+def _extract_embedded_metadata(raw_metadata) -> dict[str, str | int | None]:
+    metadata = {
+        "title": None,
+        "authors": None,
+        "year": None,
+        "creation_date": None,
+    }
+    if not isinstance(raw_metadata, dict):
+        return metadata
+
+    title = _metadata_string(raw_metadata, "/Title", "Title")
+    authors = _metadata_string(raw_metadata, "/Author", "Author")
+    creation_date = _metadata_string(
+        raw_metadata, "/CreationDate", "CreationDate"
+    )
+    year_value = _metadata_string(raw_metadata, "/Year", "Year")
+
+    metadata["title"] = title
+    metadata["authors"] = authors
+    metadata["creation_date"] = creation_date
+    metadata["year"] = _safe_year(year_value or creation_date)
+    return metadata
+
+
+def _read_metadata(pdf):
+    try:
+        return getattr(pdf, "metadata", None)
+    except Exception:
+        return None
+
+
+def _metadata_string(raw_metadata: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = raw_metadata.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _safe_year(value: str | None) -> int | None:
+    if value is None:
+        return None
+    match = re.search(r"(19\d{2}|20\d{2})", value)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _classify_quality(

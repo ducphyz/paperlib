@@ -30,7 +30,7 @@ These are frozen. Do not modify during implementation.
 | `paper_id` | `p_{sha256_of_first_file[:16]}`, stable, never changes |
 | Source of truth | JSON canonical, SQLite rebuildable |
 | On conflict | JSON wins |
-| Canonical filename | `{year}_{first_author}_{hash8}.pdf`, with `unknown_year` / `unknown_author` fallbacks |
+| Canonical filename | `{first_author}_{year}_{hash8}.pdf`, with `unknown_author` / `unknown_year` fallbacks |
 | PDF move | Before JSON write |
 | Atomic writes | tempfile + fsync + rename for all text/JSON |
 | API key | Required only when `ai.enabled=true` AND command uses AI |
@@ -104,7 +104,7 @@ paperlib/
 ```
 {library_root}/
 ├── inbox/
-├── papers/{year}/{year}_{first_author}_{hash8}.pdf
+├── papers/{year}/{first_author}_{year}_{hash8}.pdf
 ├── records/{paper_id}.json
 ├── text/{file_hash16}.txt
 ├── db/library.db
@@ -140,7 +140,7 @@ MetadataSource    : pdf_embedded_meta | pdf_text | filename | ai | user
     {
       "file_hash": "abc123def4567890abcdef",
       "original_filename": "paper.pdf",
-      "canonical_path": "papers/2024/2024_smith_abc12345.pdf",
+      "canonical_path": "papers/2024/smith_2024_abc12345.pdf",
       "text_path": "text/abc123def4567890.txt",
       "size_bytes": 1234567,
       "added_at": "2026-04-24T10:00:00Z",
@@ -269,7 +269,7 @@ For each PDF in inbox/:
   5.  CLEAN          → whitespace, ligatures, control chars
   6.  IDENTIFY       → regex DOI + arXiv; resolve alias → existing paper_id,
                        or assign new p_{hash16}
-  7.  DECIDE NAME    → {year}_{first_author}_{hash8}.pdf with fallbacks
+  7.  DECIDE NAME    → {first_author}_{year}_{hash8}.pdf with fallbacks
   8.  MOVE PDF       → papers/{year}/{canonical_name}.pdf   ← before record writes
   9.  WRITE TEXT     → text/{hash16}.txt (atomic)
   10. METADATA       → per-field extraction; skip locked
@@ -543,7 +543,7 @@ Components:
   first_author → sanitize(authors[0]) if present else "unknown_author"
   hash8        → file_hash[:8]
 
-Filename: {year}_{first_author}_{hash8}.pdf
+Filename: {first_author}_{year}_{hash8}.pdf
 Directory: papers/{year}/
 ```
 

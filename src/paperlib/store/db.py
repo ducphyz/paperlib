@@ -8,10 +8,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from paperlib.handle import generate_handle_id
 from paperlib.models.file import FileRecord
 from paperlib.models.record import PaperRecord
 from paperlib.store import migrations
-from paperlib.store.json_store import JsonStoreError, read_record
+from paperlib.store.json_store import (
+    JsonStoreError,
+    read_record,
+    write_record_atomic,
+)
+
+
+class IdNotFound(LookupError):
+    pass
 
 
 def connect(db_path) -> sqlite3.Connection:
@@ -41,12 +50,29 @@ def find_paper_id_by_alias(
     return None if row is None else row["paper_id"]
 
 
+def find_paper_id_by_handle(
+    conn: sqlite3.Connection, handle_id: str
+) -> str | None:
+    row = conn.execute(
+        "SELECT paper_id FROM papers WHERE handle_id = ?",
+        (handle_id,),
+    ).fetchone()
+    return None if row is None else row["paper_id"]
+
+
 def file_exists(conn: sqlite3.Connection, file_hash: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM files WHERE file_hash = ?",
         (file_hash,),
     ).fetchone()
     return row is not None
+
+
+def list_handle_ids(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT handle_id FROM papers WHERE handle_id IS NOT NULL"
+    ).fetchall()
+    return {row["handle_id"] for row in rows}
 
 
 def upsert_paper(
@@ -71,6 +97,7 @@ def _upsert_paper_sql(
         """
         INSERT INTO papers (
             paper_id,
+            handle_id,
             title,
             authors_json,
             year,
@@ -85,8 +112,9 @@ def _upsert_paper_sql(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(paper_id) DO UPDATE SET
+            handle_id = excluded.handle_id,
             title = excluded.title,
             authors_json = excluded.authors_json,
             year = excluded.year,
@@ -102,6 +130,7 @@ def _upsert_paper_sql(
         """,
         (
             data["paper_id"],
+            data.get("handle_id"),
             _metadata_value(metadata, "title"),
             None if authors is None else json.dumps(authors, ensure_ascii=False),
             _metadata_value(metadata, "year"),
@@ -275,21 +304,39 @@ def get_status_counts(conn: sqlite3.Connection) -> dict:
     }
 
 
-def resolve_id(conn: sqlite3.Connection, id_or_alias: str) -> str | None:
+def resolve_id(conn: sqlite3.Connection, id_or_alias: str) -> str:
+    attempted = []
     if id_or_alias.startswith("p_"):
+        attempted.append("paper_id")
         row = conn.execute(
             "SELECT paper_id FROM papers WHERE paper_id = ?",
             (id_or_alias,),
         ).fetchone()
-        return None if row is None else row["paper_id"]
+        if row is not None:
+            return row["paper_id"]
+        raise _id_not_found(id_or_alias, attempted)
 
     if ":" in id_or_alias:
-        return find_paper_id_by_alias(conn, id_or_alias)
+        attempted.append("alias")
+        paper_id = find_paper_id_by_alias(conn, id_or_alias)
+        if paper_id is not None:
+            return paper_id
+        raise _id_not_found(id_or_alias, attempted)
 
     if re.fullmatch(r"[0-9a-fA-F]{16}", id_or_alias):
-        return find_paper_id_by_alias(conn, f"hash:{id_or_alias.lower()}")
+        attempted.append("bare hash")
+        paper_id = find_paper_id_by_alias(conn, f"hash:{id_or_alias.lower()}")
+        if paper_id is not None:
+            return paper_id
+        # A handle may itself look like a 16-char hash; only claim hash
+        # resolution if the hash alias exists, then fall through to handle_id.
 
-    return None
+    attempted.append("handle_id")
+    paper_id = find_paper_id_by_handle(conn, id_or_alias)
+    if paper_id is not None:
+        return paper_id
+
+    raise _id_not_found(id_or_alias, attempted)
 
 
 def get_record_path(conn: sqlite3.Connection, paper_id: str) -> str | None:
@@ -301,27 +348,44 @@ def get_record_path(conn: sqlite3.Connection, paper_id: str) -> str | None:
 
 
 def list_papers(
-    conn: sqlite3.Connection, *, needs_review: bool = False
+    conn: sqlite3.Connection,
+    *,
+    needs_review: bool = False,
+    sort: str = "year",
 ) -> list[dict]:
     where = "WHERE review_status = 'needs_review'" if needs_review else ""
+    if sort == "handle":
+        order_by = "handle_id IS NULL ASC, handle_id ASC, paper_id ASC"
+    elif sort == "year":
+        order_by = "year IS NULL ASC, year DESC, paper_id ASC"
+    else:
+        raise ValueError(f"unsupported paper sort: {sort}")
+
     rows = conn.execute(
         f"""
-        SELECT paper_id, title, authors_json, year, review_status
+        SELECT handle_id, paper_id, title, authors_json, year, review_status
         FROM papers
         {where}
-        ORDER BY year IS NULL ASC, year DESC, paper_id ASC
+        ORDER BY {order_by}
         """
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def rebuild_index_from_records(db_path: Path, records_dir: Path) -> dict:
+def rebuild_index_from_records(
+    db_path: Path,
+    records_dir: Path,
+    *,
+    dry_run: bool = False,
+    backfill_handles: bool = True,
+) -> dict:
     db_path = Path(db_path)
     records_dir = Path(records_dir)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     backup_path = None
-    if db_path.exists():
+    if not dry_run:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run and db_path.exists():
         backup_path = db_path.with_name(
             f"{db_path.stem}.backup-{_backup_timestamp()}{db_path.suffix}"
         )
@@ -336,6 +400,29 @@ def rebuild_index_from_records(db_path: Path, records_dir: Path) -> dict:
         except (JsonStoreError, json.JSONDecodeError, OSError):
             records_skipped += 1
             json_errors += 1
+
+    handle_plan = (
+        _plan_handle_backfill(records_to_load)
+        if backfill_handles
+        else _empty_handle_plan()
+    )
+    if dry_run:
+        return {
+            "records_loaded": len(records_to_load),
+            "records_skipped": records_skipped,
+            "json_errors": json_errors,
+            "backup_path": None,
+            "handles_added": handle_plan["handles_added"],
+            "duplicate_handles_repaired": handle_plan[
+                "duplicate_handles_repaired"
+            ],
+            "handle_updates": handle_plan["handle_updates"],
+            "dry_run": True,
+            "backfill_handles": backfill_handles,
+        }
+
+    for record_path, record, _reason in handle_plan["updates"]:
+        write_record_atomic(record_path, record)
 
     conn = connect(db_path)
     init_db(conn)
@@ -356,7 +443,80 @@ def rebuild_index_from_records(db_path: Path, records_dir: Path) -> dict:
         "records_skipped": records_skipped,
         "json_errors": json_errors,
         "backup_path": None if backup_path is None else str(backup_path),
+        "handles_added": handle_plan["handles_added"],
+        "duplicate_handles_repaired": handle_plan[
+            "duplicate_handles_repaired"
+        ],
+        "handle_updates": handle_plan["handle_updates"],
+        "dry_run": False,
+        "backfill_handles": backfill_handles,
     }
+
+
+def _plan_handle_backfill(
+    records_to_load: list[tuple[Path, PaperRecord]],
+) -> dict:
+    first_owner_by_handle: dict[str, Path] = {}
+    for record_path, record in records_to_load:
+        handle_id = _clean_handle_id(record.handle_id)
+        if handle_id is None:
+            continue
+        if handle_id not in first_owner_by_handle:
+            first_owner_by_handle[handle_id] = record_path
+
+    used_handles = set(first_owner_by_handle)
+    updates = []
+    handles_added = 0
+    duplicate_handles_repaired = 0
+
+    for record_path, record in records_to_load:
+        handle_id = _clean_handle_id(record.handle_id)
+        if (
+            handle_id is not None
+            and first_owner_by_handle.get(handle_id) == record_path
+        ):
+            record.handle_id = handle_id
+            continue
+
+        record.handle_id = generate_handle_id(record, used_handles)
+        used_handles.add(record.handle_id)
+        reason = "missing" if handle_id is None else "duplicate"
+        if reason == "missing":
+            handles_added += 1
+        else:
+            duplicate_handles_repaired += 1
+        updates.append((record_path, record, reason))
+
+    return {
+        "updates": updates,
+        "handles_added": handles_added,
+        "duplicate_handles_repaired": duplicate_handles_repaired,
+        "handle_updates": len(updates),
+    }
+
+
+def _empty_handle_plan() -> dict:
+    return {
+        "updates": [],
+        "handles_added": 0,
+        "duplicate_handles_repaired": 0,
+        "handle_updates": 0,
+    }
+
+
+def _clean_handle_id(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if value.strip() else None
+
+
+def _id_not_found(id_or_alias: str, attempted: list[str]) -> IdNotFound:
+    namespaces = ", ".join(attempted)
+    supported = "paper_id, doi:, arxiv:, hash:, bare hash, handle_id"
+    return IdNotFound(
+        f"Paper not found: {id_or_alias}. Tried: {namespaces}. "
+        f"Supported namespaces: {supported}."
+    )
 
 
 def _record_dict(record: PaperRecord | dict) -> dict:

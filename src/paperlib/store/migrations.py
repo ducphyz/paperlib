@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -11,6 +11,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS papers (
             paper_id         TEXT PRIMARY KEY,
+            handle_id        TEXT,
             title            TEXT,
             authors_json     TEXT,
             year             INTEGER,
@@ -80,6 +81,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             ON aliases(paper_id);
         """
     )
+    _migrate_to_v2(conn)
     conn.execute(
         """
         INSERT OR IGNORE INTO schema_migrations (version, applied_at)
@@ -88,3 +90,20 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         (SCHEMA_VERSION,),
     )
     conn.commit()
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    if not _has_column(conn, "papers", "handle_id"):
+        conn.execute("ALTER TABLE papers ADD COLUMN handle_id TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_handle_id
+            ON papers(handle_id)
+            WHERE handle_id IS NOT NULL
+        """
+    )
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)

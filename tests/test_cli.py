@@ -410,7 +410,7 @@ def _write_show_fixture(root: Path, config_path: Path) -> None:
     _write_config(config_path, root)
     records_dir = root / "records"
     records_dir.mkdir(parents=True)
-    record = PaperRecord(paper_id="p_show")
+    record = PaperRecord(paper_id="p_show", handle_id="show_2024")
     record.identity.doi = "10.1234/example"
     record.identity.arxiv_id = "2401.12345"
     record.identity.aliases = [
@@ -442,7 +442,25 @@ def test_show_by_paper_id_prints_json(tmp_path: Path):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["paper_id"] == "p_show"
+    assert data["handle_id"] == "show_2024"
     assert data["schema_version"] == 1
+
+
+def test_show_by_handle_id_works_and_prints_handle_near_top(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_show_fixture(root, config_path)
+
+    result = CliRunner().invoke(
+        main, ["show", "show_2024", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["paper_id"] == "p_show"
+    assert data["handle_id"] == "show_2024"
+    assert result.output.index('"handle_id"') < result.output.index('"paper_id"')
 
 
 def test_show_by_arxiv_alias_works(tmp_path: Path):
@@ -487,6 +505,33 @@ def test_show_by_bare_hash_works(tmp_path: Path):
     assert json.loads(result.output)["paper_id"] == "p_show"
 
 
+def test_show_record_with_null_handle_id_does_not_crash(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    records_dir = root / "records"
+    records_dir.mkdir(parents=True)
+    record = PaperRecord(paper_id="p_no_handle")
+    write_record_atomic(records_dir / "p_no_handle.json", record)
+
+    conn = db.connect(root / "db" / "library.db")
+    db.init_db(conn)
+    try:
+        db.upsert_paper(conn, record, "records/p_no_handle.json")
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        main, ["show", "p_no_handle", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["paper_id"] == "p_no_handle"
+    assert data["handle_id"] is None
+
+
 def test_show_nonexistent_id_exits_nonzero(tmp_path: Path):
     root = tmp_path / "library"
     root.mkdir()
@@ -499,6 +544,7 @@ def test_show_nonexistent_id_exits_nonzero(tmp_path: Path):
 
     assert result.exit_code != 0
     assert "Paper not found: p_missing" in result.output
+    assert "Supported namespaces" in result.output
 
 
 def test_cli_show_by_paper_id_and_hash_after_ingest_print_valid_json(
@@ -540,6 +586,7 @@ def _insert_list_row(
     title,
     authors_json,
     year,
+    handle_id: str | None = None,
     review_status: str = "needs_review",
 ) -> None:
     conn = db.connect(root / "db" / "library.db")
@@ -549,14 +596,15 @@ def _insert_list_row(
         conn.execute(
             """
             INSERT INTO papers (
-                paper_id, title, authors_json, year,
+                paper_id, handle_id, title, authors_json, year,
                 metadata_status, summary_status, duplicate_status,
                 review_status, record_path, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 'ok', 'pending', 'unique', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'ok', 'pending', 'unique', ?, ?, ?, ?)
             """,
             (
                 paper_id,
+                handle_id,
                 title,
                 authors_json,
                 year,
@@ -604,6 +652,7 @@ def test_list_prints_missing_title_unknown_author_and_truncated_title(
     _insert_list_row(
         root,
         paper_id="p_long",
+        handle_id="long_2025",
         title=long_title,
         authors_json='["Ada Lovelace", "Grace Hopper"]',
         year=2025,
@@ -613,9 +662,42 @@ def test_list_prints_missing_title_unknown_author_and_truncated_title(
     result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
 
     assert result.exit_code == 0
+    assert (
+        "handle_id | paper_id | year | first_author | title | review_status"
+        in result.output
+    )
+    assert (
+        "<none> | p_missing | <unknown> | <unknown> | <no title> | needs_review"
+        in result.output
+    )
+    assert (
+        f"long_2025 | p_long | 2025 | Ada Lovelace | {'L' * 57}... | reviewed"
+        in result.output
+    )
+
+
+def test_list_no_handle_hides_handle_column(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    _insert_list_row(
+        root,
+        paper_id="p_row",
+        handle_id="row_2024",
+        title="A Row",
+        authors_json='["Ada"]',
+        year=2024,
+    )
+
+    result = CliRunner().invoke(
+        main, ["list", "--no-handle", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
     assert "paper_id | year | first_author | title | review_status" in result.output
-    assert "p_missing | <unknown> | <unknown> | <no title> | needs_review" in result.output
-    assert f"p_long | 2025 | Ada Lovelace | {'L' * 57}... | reviewed" in result.output
+    assert "row_2024" not in result.output
+    assert "p_row | 2024 | Ada | A Row | needs_review" in result.output
 
 
 def test_list_needs_review_filters_rows(tmp_path: Path):
@@ -626,6 +708,7 @@ def test_list_needs_review_filters_rows(tmp_path: Path):
     _insert_list_row(
         root,
         paper_id="p_needs",
+        handle_id="needs_2024",
         title="Needs Review",
         authors_json='["Ada"]',
         year=2024,
@@ -634,6 +717,7 @@ def test_list_needs_review_filters_rows(tmp_path: Path):
     _insert_list_row(
         root,
         paper_id="p_reviewed",
+        handle_id="reviewed_2025",
         title="Reviewed",
         authors_json='["Grace"]',
         year=2025,
@@ -645,7 +729,10 @@ def test_list_needs_review_filters_rows(tmp_path: Path):
     )
 
     assert result.exit_code == 0
-    assert "p_needs | 2024 | Ada | Needs Review | needs_review" in result.output
+    assert (
+        "needs_2024 | p_needs | 2024 | Ada | Needs Review | needs_review"
+        in result.output
+    )
     assert "p_reviewed" not in result.output
 
 
@@ -657,6 +744,7 @@ def test_list_invalid_authors_json_prints_unknown(tmp_path: Path):
     _insert_list_row(
         root,
         paper_id="p_bad_authors",
+        handle_id="bad_authors_2024",
         title="Bad Authors",
         authors_json="{bad json",
         year=2024,
@@ -665,7 +753,41 @@ def test_list_invalid_authors_json_prints_unknown(tmp_path: Path):
     result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert "p_bad_authors | 2024 | <unknown> | Bad Authors | needs_review" in result.output
+    assert (
+        "bad_authors_2024 | p_bad_authors | 2024 | <unknown> | Bad Authors | "
+        "needs_review"
+        in result.output
+    )
+
+
+def test_list_sort_handle_sorts_by_handle_id(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    _insert_list_row(
+        root,
+        paper_id="p_zeta",
+        handle_id="zeta_2024",
+        title="Zeta",
+        authors_json='["Zed"]',
+        year=2024,
+    )
+    _insert_list_row(
+        root,
+        paper_id="p_alpha",
+        handle_id="alpha_2024",
+        title="Alpha",
+        authors_json='["Ada"]',
+        year=2023,
+    )
+
+    result = CliRunner().invoke(
+        main, ["list", "--sort", "handle", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    assert result.output.index("alpha_2024") < result.output.index("zeta_2024")
 
 
 def test_list_after_cli_ingest_prints_ingested_row(tmp_path: Path):
@@ -715,3 +837,32 @@ def test_rebuild_index_restores_db_after_deleting_db(tmp_path: Path):
     assert status_result.exit_code == 0
     assert "papers:              1" in status_result.output
     assert "files:               1" in status_result.output
+
+
+def test_rebuild_index_dry_run_reports_handle_backfill_without_writes(
+    tmp_path: Path,
+):
+    root = tmp_path / "library"
+    records_dir = root / "records"
+    records_dir.mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    record = PaperRecord(paper_id="p_0440c911081cc43b").to_dict()
+    record.pop("handle_id")
+    record["metadata"]["year"]["value"] = 2024
+    write_record_atomic(records_dir / "p_0440c911081cc43b.json", record)
+    before_json = (records_dir / "p_0440c911081cc43b.json").read_text(
+        encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        main, ["rebuild-index", "--dry-run", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "1 records would receive handle_id" in result.output
+    assert (
+        (records_dir / "p_0440c911081cc43b.json").read_text(encoding="utf-8")
+        == before_json
+    )
+    assert not (root / "db" / "library.db").exists()

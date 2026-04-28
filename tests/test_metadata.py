@@ -1,9 +1,14 @@
+from paperlib.models import status as status_values
 from paperlib.pipeline.metadata import (
     build_non_ai_metadata_fields,
     detect_arxiv_id,
     detect_doi,
     detect_year,
+    extract_authors_from_pdf_metadata,
     extract_non_ai_metadata,
+    extract_title_from_pdf_metadata,
+    extract_year_from_pdf_metadata,
+    parse_filename_metadata,
 )
 
 
@@ -130,3 +135,137 @@ def test_build_non_ai_metadata_fields_leaves_year_null_when_unknown():
         "locked": False,
         "updated_at": None,
     }
+
+
+def test_build_non_ai_metadata_fields_uses_full_embedded_metadata():
+    metadata = build_non_ai_metadata_fields(
+        year=None,
+        year_confidence=None,
+        doi=None,
+        arxiv_id=None,
+        embedded_pdf_metadata={
+            "/Title": "  Microwave   Response  ",
+            "/Author": "A. Smith; B. Jones",
+            "/CreationDate": "D:20140301000000Z",
+        },
+        original_filename="download.pdf",
+        now_iso="2026-04-25T00:00:00Z",
+    )
+
+    assert metadata["title"].value == "Microwave Response"
+    assert metadata["title"].source == status_values.SOURCE_PDF_EMBEDDED_META
+    assert metadata["title"].confidence == 0.60
+    assert metadata["title"].locked is False
+    assert metadata["authors"].value == ["A. Smith", "B. Jones"]
+    assert metadata["authors"].source == status_values.SOURCE_PDF_EMBEDDED_META
+    assert metadata["year"].value == 2014
+    assert metadata["year"].source == status_values.SOURCE_PDF_EMBEDDED_META
+    assert metadata["year"].locked is False
+
+
+def test_build_non_ai_metadata_fields_allows_filename_partial_fallbacks():
+    title_only = build_non_ai_metadata_fields(
+        year=None,
+        year_confidence=None,
+        doi=None,
+        arxiv_id=None,
+        embedded_pdf_metadata={"/Title": "Embedded Title"},
+        original_filename="2014 - Smith - Microwave Response.pdf",
+        now_iso="2026-04-25T00:00:00Z",
+    )
+    authors_only = build_non_ai_metadata_fields(
+        year=None,
+        year_confidence=None,
+        doi=None,
+        arxiv_id=None,
+        embedded_pdf_metadata={"/Author": "A. Smith and B. Jones"},
+        original_filename="2014 - Smith - Microwave Response.pdf",
+        now_iso="2026-04-25T00:00:00Z",
+    )
+
+    assert title_only["title"].value == "Embedded Title"
+    assert title_only["authors"].value == ["Smith"]
+    assert title_only["authors"].source == status_values.SOURCE_FILENAME
+    assert title_only["year"].value == 2014
+    assert authors_only["title"].value == "Microwave Response"
+    assert authors_only["title"].source == status_values.SOURCE_FILENAME
+    assert authors_only["authors"].value == ["A. Smith", "B. Jones"]
+
+
+def test_embedded_pdf_metadata_junk_titles_are_rejected():
+    for title in (
+        "untitled",
+        "unknown",
+        "none",
+        "paper.pdf",
+        "Microsoft Word",
+        "Microsoft Word - something",
+    ):
+        assert extract_title_from_pdf_metadata({"/Title": title}) is None
+
+
+def test_embedded_pdf_metadata_junk_authors_are_rejected():
+    for author in (
+        "unknown",
+        "anonymous",
+        "none",
+        "Microsoft Word",
+        "LaTeX",
+        "pdfTeX",
+        "Acrobat",
+        "Adobe",
+    ):
+        assert extract_authors_from_pdf_metadata({"/Author": author}) is None
+
+
+def test_embedded_pdf_metadata_future_year_is_rejected():
+    assert extract_year_from_pdf_metadata({"CreationDate": "D:20990101"}) is None
+
+
+def test_filename_metadata_supported_patterns():
+    assert parse_filename_metadata("2014 - Smith - Microwave Response.pdf") == {
+        "title": "Microwave Response",
+        "authors": ["Smith"],
+        "year": 2014,
+        "arxiv_id": None,
+    }
+    assert parse_filename_metadata("Smith2014_Microwave_Response.pdf") == {
+        "title": "Microwave Response",
+        "authors": ["Smith"],
+        "year": 2014,
+        "arxiv_id": None,
+    }
+    assert parse_filename_metadata("arXiv-2401.12345v2.pdf") == {
+        "title": None,
+        "authors": None,
+        "year": None,
+        "arxiv_id": "2401.12345v2",
+    }
+    assert parse_filename_metadata("download.pdf") == {
+        "title": None,
+        "authors": None,
+        "year": None,
+        "arxiv_id": None,
+    }
+    assert parse_filename_metadata("paper.pdf") == {
+        "title": None,
+        "authors": None,
+        "year": None,
+        "arxiv_id": None,
+    }
+
+
+def test_existing_arxiv_year_takes_precedence_over_embedded_year():
+    metadata = build_non_ai_metadata_fields(
+        year=2024,
+        year_confidence=0.95,
+        doi=None,
+        arxiv_id="2401.12345",
+        embedded_pdf_metadata={"CreationDate": "D:20190101"},
+        original_filename="2018 - Smith - Title.pdf",
+        now_iso="2026-04-25T00:00:00Z",
+    )
+
+    assert metadata["year"].value == 2024
+    assert metadata["year"].source == status_values.SOURCE_PDF_TEXT
+    assert metadata["year"].confidence == 0.95

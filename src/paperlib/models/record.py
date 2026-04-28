@@ -64,6 +64,7 @@ def _default_timestamps() -> dict:
 class PaperRecord:
     schema_version: int = 1
     paper_id: str = ""
+    handle_id: str | None = None
     identity: PaperIdentity = field(default_factory=PaperIdentity)
     files: list[FileRecord] = field(default_factory=list)
     metadata: dict[str, MetadataField] = field(default_factory=_default_metadata)
@@ -76,6 +77,7 @@ class PaperRecord:
         return {
             "schema_version": self.schema_version,
             "paper_id": self.paper_id,
+            "handle_id": self.handle_id,
             "identity": self.identity.to_dict(),
             "files": [file_record.to_dict() for file_record in self.files],
             "metadata": {
@@ -115,6 +117,7 @@ class PaperRecord:
         return cls(
             schema_version=data.get("schema_version", 1),
             paper_id=data.get("paper_id", ""),
+            handle_id=data.get("handle_id"),
             identity=PaperIdentity.from_dict(data.get("identity", {})),
             files=[
                 FileRecord.from_dict(file_data)

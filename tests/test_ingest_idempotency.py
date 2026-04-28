@@ -73,6 +73,30 @@ def _fake_extract(path: Path, *, min_char_count: int, min_word_count: int):
     )
 
 
+def _fake_extract_with_embedded_authors(
+    path: Path, *, min_char_count: int, min_word_count: int
+):
+    raw_text = "body text"
+    return ExtractionResult(
+        path=path,
+        status=status.EXTRACTION_OK,
+        engine="pdfplumber",
+        engine_version="test",
+        page_count=1,
+        char_count=len(raw_text),
+        word_count=len(raw_text.split()),
+        quality=status.QUALITY_GOOD,
+        warnings=[],
+        raw_text=raw_text,
+        embedded_metadata={
+            "title": "Microwave Response",
+            "authors": "A. Smith; B. Jones",
+            "creation_date": "D:20140301000000Z",
+            "year": 2014,
+        },
+    )
+
+
 def _create_runtime_dirs(config: AppConfig) -> None:
     for path in (
         config.paths.inbox,
@@ -213,6 +237,7 @@ def test_ingest_library_writes_record_text_db_and_moves_pdf(
     moved_pdf = root / record.files[0].canonical_path
 
     assert moved_pdf.exists()
+    assert record.handle_id == "untitled_2024"
     assert record.identity.doi == "10.1103/physrevlett.123.456"
     assert record.identity.arxiv_id == "2401.12345"
     assert record.metadata["year"].value == 2024
@@ -221,6 +246,42 @@ def test_ingest_library_writes_record_text_db_and_moves_pdf(
     text_path = config.paths.text / f"{record.files[0].file_hash[:16]}.txt"
     assert text_path.exists()
     assert config.paths.db.exists()
+    with sqlite3.connect(config.paths.db) as conn:
+        row = conn.execute(
+            "SELECT handle_id FROM papers WHERE paper_id = ?",
+            (record.paper_id,),
+        ).fetchone()
+    assert row[0] == record.handle_id
+
+
+def test_ingest_derives_first_author_from_metadata_authors(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    inbox = root / "inbox"
+    inbox.mkdir(parents=True)
+    pdf_path = inbox / "paper.pdf"
+    pdf_path.write_bytes(b"fake pdf")
+    config = _config(root)
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_embedded_authors,
+    )
+
+    report = ingest_library(config, no_ai=True)
+    record = read_record(next(config.paths.records.glob("p_*.json")))
+
+    assert report.records_written == 1
+    assert record.handle_id == "smith_2014"
+    assert record.metadata["authors"].value == ["A. Smith", "B. Jones"]
+    assert record.files[0].canonical_path.startswith("papers/2014/smith_2014_")
+    assert "_None_" not in record.files[0].canonical_path
+    assert "unknown_author" not in record.files[0].canonical_path
 
 
 def test_ingest_library_skips_existing_file_hash_on_second_run(
@@ -283,6 +344,7 @@ def test_ingest_library_reuses_record_for_existing_non_hash_alias(
     assert first.records_written == 1
     record_path = next(config.paths.records.glob("p_*.json"))
     original_record = read_record(record_path)
+    original_record.handle_id = "stable_2024"
     original_record.summary["status"] = status.SUMMARY_GENERATED
     original_record.summary["one_sentence"] = "Existing summary."
     original_record.status["summary"] = status.SUMMARY_GENERATED
@@ -296,6 +358,7 @@ def test_ingest_library_reuses_record_for_existing_non_hash_alias(
     assert second.records_written == 1
     assert len(list(config.paths.records.glob("p_*.json"))) == 1
     assert updated_record.paper_id == original_record.paper_id
+    assert updated_record.handle_id == "stable_2024"
     assert updated_record.status["duplicate"] == status.DUPLICATE_ALIAS
     assert updated_record.summary["status"] == status.SUMMARY_SKIPPED
     assert updated_record.summary["one_sentence"] == "Existing summary."

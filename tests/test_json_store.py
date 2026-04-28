@@ -20,6 +20,7 @@ def test_write_and_read_record_round_trip(tmp_path: Path):
 
     loaded = read_record(path)
     assert loaded.paper_id == "p_test"
+    assert loaded.handle_id is None
     assert loaded.schema_version == 1
 
 
@@ -31,6 +32,7 @@ def test_write_and_read_dict_round_trip(tmp_path: Path):
 
     loaded = read_record_dict(path)
     assert loaded["paper_id"] == "p_test"
+    assert "handle_id" in loaded
     assert loaded["schema_version"] == 1
 
 

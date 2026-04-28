@@ -210,6 +210,23 @@ def test_apply_ai_title_authors_journal_update_unlocked_fields():
     assert record.metadata["title"].updated_at == "2026-04-26T12:00:00Z"
 
 
+def test_apply_ai_overrides_unlocked_embedded_metadata_fields():
+    record = PaperRecord(paper_id="p_test")
+    record.metadata["title"].value = "Embedded Title"
+    record.metadata["title"].source = status_values.SOURCE_PDF_EMBEDDED_META
+    record.metadata["title"].confidence = 0.60
+    record.metadata["authors"].value = ["Embedded Author"]
+    record.metadata["authors"].source = status_values.SOURCE_PDF_EMBEDDED_META
+    record.metadata["authors"].confidence = 0.60
+
+    updated = _apply_record(record)
+
+    assert updated.metadata["title"].value == "A Paper"
+    assert updated.metadata["title"].source == status_values.SOURCE_AI
+    assert updated.metadata["authors"].value == ["Ada Lovelace"]
+    assert updated.metadata["authors"].source == status_values.SOURCE_AI
+
+
 def test_apply_ai_locked_title_is_not_overwritten():
     record = PaperRecord(paper_id="p_test")
     record.metadata["title"].value = "Human Title"
