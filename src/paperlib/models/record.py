@@ -53,7 +53,7 @@ def _default_status() -> dict:
 
 
 def _default_review() -> dict:
-    return {"notes": "", "locked": False}
+    return {"notes": "", "locked": False, "reviewed_at": None}
 
 
 def _default_timestamps() -> dict:

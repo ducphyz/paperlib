@@ -68,6 +68,16 @@ def file_exists(conn: sqlite3.Connection, file_hash: str) -> bool:
     return row is not None
 
 
+def find_paper_id_by_file_hash(
+    conn: sqlite3.Connection, file_hash: str
+) -> str | None:
+    row = conn.execute(
+        "SELECT paper_id FROM files WHERE file_hash = ?",
+        (file_hash,),
+    ).fetchone()
+    return None if row is None else row["paper_id"]
+
+
 def list_handle_ids(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute(
         "SELECT handle_id FROM papers WHERE handle_id IS NOT NULL"

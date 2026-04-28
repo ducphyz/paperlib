@@ -547,6 +547,97 @@ def test_show_nonexistent_id_exits_nonzero(tmp_path: Path):
     assert "Supported namespaces" in result.output
 
 
+def test_mark_reviewed_by_handle_updates_json_and_sqlite(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_show_fixture(root, config_path)
+
+    result = CliRunner().invoke(
+        main, ["mark-reviewed", "show_2024", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "marked reviewed: show_2024" in result.output
+    record = read_record(root / "records" / "p_show.json")
+    assert record.status["review"] == "reviewed"
+    assert record.review["locked"] is True
+    assert record.review["reviewed_at"]
+    assert record.timestamps["updated_at"] == record.review["reviewed_at"]
+    conn = db.connect(root / "db" / "library.db")
+    try:
+        row = conn.execute(
+            "SELECT review_status FROM papers WHERE paper_id = 'p_show'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["review_status"] == "reviewed"
+
+
+def test_mark_reviewed_by_paper_id_works(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_show_fixture(root, config_path)
+
+    result = CliRunner().invoke(
+        main, ["mark-reviewed", "p_show", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    record = read_record(root / "records" / "p_show.json")
+    assert record.status["review"] == "reviewed"
+    assert record.review["locked"] is True
+
+
+def test_mark_reviewed_missing_id_fails_without_modifying_json(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_show_fixture(root, config_path)
+    record_path = root / "records" / "p_show.json"
+    before_json = record_path.read_text(encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main, ["mark-reviewed", "missing_handle", "--config", str(config_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "Paper not found: missing_handle" in result.output
+    assert record_path.read_text(encoding="utf-8") == before_json
+
+
+def test_mark_reviewed_fills_old_review_object(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    records_dir = root / "records"
+    records_dir.mkdir(parents=True)
+    record = PaperRecord(paper_id="p_old", handle_id="old_2024").to_dict()
+    record["review"] = {"notes": "old shape"}
+    write_record_atomic(records_dir / "p_old.json", record)
+    loaded = read_record(records_dir / "p_old.json")
+
+    conn = db.connect(root / "db" / "library.db")
+    db.init_db(conn)
+    try:
+        db.upsert_paper(conn, loaded, "records/p_old.json")
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        main, ["mark-reviewed", "old_2024", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    updated = read_record(records_dir / "p_old.json")
+    assert updated.review["notes"] == "old shape"
+    assert updated.review["locked"] is True
+    assert updated.review["reviewed_at"]
+    assert updated.status["review"] == "reviewed"
+
+
 def test_cli_show_by_paper_id_and_hash_after_ingest_print_valid_json(
     tmp_path: Path,
 ):

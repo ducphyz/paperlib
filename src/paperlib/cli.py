@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -12,7 +13,11 @@ from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
-from paperlib.store.json_store import read_record_dict
+from paperlib.store.json_store import (
+    read_record,
+    read_record_dict,
+    write_record_atomic,
+)
 
 
 @click.group()
@@ -230,6 +235,60 @@ def show(id_or_alias: str, config_path: str) -> None:
     )
 
 
+@main.command("mark-reviewed")
+@click.argument("id_or_alias")
+@click.option("--config", "config_path", default="config.toml", show_default=True)
+def mark_reviewed(id_or_alias: str, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    try:
+        try:
+            paper_id = db.resolve_id(conn, id_or_alias)
+        except db.IdNotFound as exc:
+            raise click.ClickException(str(exc)) from exc
+        record_path_value = db.get_record_path(conn, paper_id)
+    finally:
+        conn.close()
+
+    if record_path_value is None:
+        raise click.ClickException(f"Record path not found for: {paper_id}")
+
+    record_path = Path(record_path_value)
+    if not record_path.is_absolute():
+        record_path = config.library.root / record_path
+
+    try:
+        record = read_record(record_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    now = _utc_now()
+    record.status["review"] = "reviewed"
+    record.review["locked"] = True
+    record.review["reviewed_at"] = now
+    record.timestamps["updated_at"] = now
+
+    write_record_atomic(record_path, record)
+
+    conn = db.connect(db_path)
+    try:
+        db.upsert_paper(conn, record, record_path_value)
+    finally:
+        conn.close()
+
+    click.echo(f"marked reviewed: {record.handle_id or record.paper_id}")
+
+
 @main.command("list")
 @click.option("--needs-review", is_flag=True)
 @click.option("--no-handle", is_flag=True)
@@ -287,6 +346,7 @@ def _print_ingest_report(report) -> None:
     click.echo(f"{'summaries generated:':<21}{report.summaries_generated}")
     click.echo(f"{'summaries failed:':<21}{report.summaries_failed}")
     click.echo(f"{'summaries skipped:':<21}{report.summaries_skipped}")
+    click.echo(f"{'locked skipped:':<21}{report.locked_skipped}")
     click.echo(f"{'warnings:':<21}{len(report.warnings)}")
     if report.warnings:
         click.echo("Warnings:")
@@ -334,6 +394,12 @@ def _truncate_title(value) -> str:
     if not value:
         return "<no title>"
     return value if len(value) <= 60 else f"{value[:57]}..."
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def _print_dry_run_table(pdfs) -> None:

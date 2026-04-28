@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from paperlib.config import AppConfig
 from paperlib.handle import generate_handle_id
@@ -43,6 +45,7 @@ class IngestReport:
     summaries_generated: int = 0
     summaries_failed: int = 0
     summaries_skipped: int = 0
+    locked_skipped: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -119,7 +122,20 @@ def ingest_library(
     try:
         for pdf in selected:
             try:
-                if db.file_exists(conn, pdf.file_hash):
+                existing_file_paper_id = db.find_paper_id_by_file_hash(
+                    conn, pdf.file_hash
+                )
+                if existing_file_paper_id is not None:
+                    existing_record = _load_existing_record(
+                        config, conn, existing_file_paper_id
+                    )
+                    if existing_record.review.get("locked", False):
+                        report.locked_skipped += 1
+                        logger.warning(
+                            "%s: locked record skipped during ingest",
+                            _record_label(existing_record),
+                        )
+                        continue
                     report.skipped_existing += 1
                     logger.info(
                         "exact duplicate skipped: path=%s hash16=%s",
@@ -219,15 +235,6 @@ def _ingest_pdf(
         arxiv_id=metadata_values["arxiv_id"],
     )
     paper_id = _find_existing_paper_id(conn, aliases[1:])
-    file_record = _build_file_record(
-        config, pdf, extraction, metadata_fields, now
-    )
-    logger.info(
-        "canonical filename decided: path=%s canonical_path=%s",
-        pdf.path,
-        file_record.canonical_path,
-    )
-
     if paper_id is None:
         paper_id = f"p_{pdf.hash16}"
         record = _new_record(
@@ -239,11 +246,44 @@ def _ingest_pdf(
         )
         record.handle_id = generate_handle_id(record, db.list_handle_ids(conn))
     else:
-        record = read_record(config.paths.records / f"{paper_id}.json")
+        record = _load_existing_record(config, conn, paper_id)
+        if record.review.get("locked", False):
+            report.locked_skipped += 1
+            logger.warning(
+                "%s: locked record skipped during ingest",
+                _record_label(record),
+            )
+            return
+
+        locked_preserved = _merge_unlocked_metadata(
+            record, metadata_fields, now
+        )
+        if locked_preserved:
+            logger.warning(
+                "%s: %s locked fields preserved",
+                _record_label(record),
+                locked_preserved,
+            )
+        if record.identity.doi is None and metadata_values["doi"] is not None:
+            record.identity.doi = metadata_values["doi"]
+        if (
+            record.identity.arxiv_id is None
+            and metadata_values["arxiv_id"] is not None
+        ):
+            record.identity.arxiv_id = metadata_values["arxiv_id"]
         record.status["duplicate"] = status_values.DUPLICATE_ALIAS
         record.identity.aliases = _merge_unique(record.identity.aliases, aliases)
         record.timestamps.setdefault("created_at", now)
         record.timestamps["updated_at"] = now
+
+    file_record = _build_file_record(
+        config, pdf, extraction, record.metadata, now
+    )
+    logger.info(
+        "canonical filename decided: path=%s canonical_path=%s",
+        pdf.path,
+        file_record.canonical_path,
+    )
 
     if not any(existing.file_hash == pdf.file_hash for existing in record.files):
         record.files.append(file_record)
@@ -259,6 +299,7 @@ def _ingest_pdf(
     if no_ai or not config.ai.enabled:
         _mark_summary_skipped(record)
     elif not record.summary.get("locked", False):
+        locked_metadata = _locked_metadata(record)
         record, generated, error_message = summarise_record(
             record,
             cleaned_text=cleaned_text,
@@ -275,6 +316,13 @@ def _ingest_pdf(
             report.summaries_failed += 1
         if error_message is not None:
             report.warnings.append(error_message)
+        restored_count = _restore_locked_metadata(record, locked_metadata)
+        if restored_count:
+            logger.warning(
+                "%s: %s locked fields preserved after AI",
+                _record_label(record),
+                restored_count,
+            )
 
     if record.status.get("summary") == status_values.SUMMARY_SKIPPED:
         report.summaries_skipped += 1
@@ -372,12 +420,91 @@ def _find_existing_paper_id(conn, aliases: list[str]) -> str | None:
     return None
 
 
+def _load_existing_record(config: AppConfig, conn, paper_id: str) -> PaperRecord:
+    record_path_value = db.get_record_path(conn, paper_id)
+    if record_path_value is None:
+        record_path = config.paths.records / f"{paper_id}.json"
+    else:
+        record_path = Path(record_path_value)
+        if not record_path.is_absolute():
+            record_path = config.library.root / record_path
+    return read_record(record_path)
+
+
 def _merge_unique(existing: list[str], incoming: list[str]) -> list[str]:
     merged = list(existing)
     for value in incoming:
         if value not in merged:
             merged.append(value)
     return merged
+
+
+def _merge_unlocked_metadata(
+    record: PaperRecord, incoming_metadata: dict, now: str
+) -> int:
+    locked_preserved = 0
+    for field_name, existing_field in record.metadata.items():
+        if existing_field.locked:
+            locked_preserved += 1
+            continue
+
+        incoming_field = incoming_metadata.get(field_name)
+        if incoming_field is None or incoming_field.value is None:
+            continue
+
+        record.metadata[field_name] = incoming_field
+
+    record.status["metadata"] = _metadata_status(record)
+    record.timestamps["updated_at"] = now
+    return locked_preserved
+
+
+def _locked_metadata(record: PaperRecord) -> dict:
+    return {
+        name: deepcopy(field_value)
+        for name, field_value in record.metadata.items()
+        if field_value.locked
+    }
+
+
+def _restore_locked_metadata(record: PaperRecord, locked_metadata: dict) -> int:
+    for name, field_value in locked_metadata.items():
+        record.metadata[name] = field_value
+    return len(locked_metadata)
+
+
+def _metadata_status(record: PaperRecord) -> str:
+    title_exists = _field_exists(record.metadata["title"].value)
+    authors_exist = _field_exists(record.metadata["authors"].value)
+    if title_exists and authors_exist:
+        return status_values.METADATA_OK
+
+    if any(
+        _field_exists(value)
+        for value in (
+            record.metadata["journal"].value,
+            record.metadata["year"].value,
+            record.identity.doi,
+            record.identity.arxiv_id,
+        )
+    ) or title_exists or authors_exist:
+        return status_values.METADATA_PARTIAL
+
+    return status_values.METADATA_PENDING
+
+
+def _field_exists(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return True
+
+
+def _record_label(record: PaperRecord) -> str:
+    return record.handle_id or record.paper_id
 
 
 def _mark_summary_skipped(record: PaperRecord) -> None:

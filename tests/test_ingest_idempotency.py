@@ -10,6 +10,7 @@ from paperlib.config import (
     PipelineConfig,
 )
 from paperlib.models import status
+from paperlib.models.record import PaperRecord
 from paperlib.pipeline.discover import DiscoveredPDF
 from paperlib.pipeline.extract import ExtractionResult
 from paperlib.pipeline.ingest import ingest_library
@@ -97,6 +98,34 @@ def _fake_extract_with_embedded_authors(
     )
 
 
+def _fake_extract_with_incoming_metadata(
+    path: Path, *, min_char_count: int, min_word_count: int
+):
+    raw_text = (
+        "Published 12 March 2024\n"
+        "DOI 10.1103/PhysRevLett.123.456\n"
+        "body text"
+    )
+    return ExtractionResult(
+        path=path,
+        status=status.EXTRACTION_OK,
+        engine="pdfplumber",
+        engine_version="test",
+        page_count=1,
+        char_count=len(raw_text),
+        word_count=len(raw_text.split()),
+        quality=status.QUALITY_GOOD,
+        warnings=[],
+        raw_text=raw_text,
+        embedded_metadata={
+            "title": "Machine Title",
+            "authors": "New Author; Second Author",
+            "creation_date": "D:20240301000000Z",
+            "year": 2024,
+        },
+    )
+
+
 def _create_runtime_dirs(config: AppConfig) -> None:
     for path in (
         config.paths.inbox,
@@ -170,6 +199,32 @@ def _discovered(path: Path, file_hash: str) -> DiscoveredPDF:
         size_bytes=path.stat().st_size,
         modified_time="2026-04-26T00:00:00Z",
     )
+
+
+def _write_existing_alias_record(
+    config: AppConfig, record: PaperRecord
+) -> Path:
+    _create_runtime_dirs(config)
+    record_path = config.paths.records / f"{record.paper_id}.json"
+    write_record_atomic(record_path, record)
+    conn = db.connect(config.paths.db)
+    db.init_db(conn)
+    try:
+        db.upsert_paper(conn, record, f"records/{record.paper_id}.json")
+        db.insert_aliases(conn, record.paper_id, record.identity.aliases)
+    finally:
+        conn.close()
+    return record_path
+
+
+def _existing_record() -> PaperRecord:
+    record = PaperRecord(paper_id="p_existing", handle_id="smith_2024")
+    record.identity.doi = "10.1103/physrevlett.123.456"
+    record.identity.aliases = ["doi:10.1103/physrevlett.123.456"]
+    record.metadata["title"].value = "Manual Title"
+    record.metadata["authors"].value = ["Manual Author"]
+    record.metadata["year"].value = 2020
+    return record
 
 
 def test_ingest_library_dry_run_does_not_write_or_move(
@@ -367,6 +422,185 @@ def test_ingest_library_reuses_record_for_existing_non_hash_alias(
     assert len(updated_record.identity.aliases) == len(
         set(updated_record.identity.aliases)
     )
+
+
+def test_ingest_preserves_locked_metadata_field_on_existing_record(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    config = _config(root)
+    record = _existing_record()
+    record.metadata["title"].locked = True
+    record_path = _write_existing_alias_record(config, record)
+    incoming_pdf = config.paths.inbox / "incoming.pdf"
+    incoming_pdf.write_bytes(b"incoming fake pdf")
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_incoming_metadata,
+    )
+
+    report = ingest_library(config, no_ai=True)
+    updated = read_record(record_path)
+
+    assert report.records_written == 1
+    assert updated.metadata["title"].value == "Manual Title"
+    assert updated.metadata["title"].locked is True
+    assert updated.metadata["authors"].value == ["New Author", "Second Author"]
+    assert updated.metadata["year"].value == 2024
+
+
+def test_ingest_preserves_multiple_locked_metadata_fields(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    config = _config(root)
+    record = _existing_record()
+    record.metadata["title"].locked = True
+    record.metadata["authors"].locked = True
+    record_path = _write_existing_alias_record(config, record)
+    incoming_pdf = config.paths.inbox / "incoming.pdf"
+    incoming_pdf.write_bytes(b"incoming fake pdf")
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_incoming_metadata,
+    )
+
+    report = ingest_library(config, no_ai=True)
+    updated = read_record(record_path)
+
+    assert report.records_written == 1
+    assert updated.metadata["title"].value == "Manual Title"
+    assert updated.metadata["authors"].value == ["Manual Author"]
+    assert updated.metadata["title"].locked is True
+    assert updated.metadata["authors"].locked is True
+    assert updated.metadata["year"].value == 2024
+
+
+def test_ingest_skips_fully_locked_record_without_rewriting_json(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    config = _config(root)
+    record = _existing_record()
+    record.review["locked"] = True
+    record.status["review"] = status.REVIEW_REVIEWED
+    record_path = _write_existing_alias_record(config, record)
+    before_json = record_path.read_text(encoding="utf-8")
+    incoming_pdf = config.paths.inbox / "incoming.pdf"
+    incoming_pdf.write_bytes(b"incoming fake pdf")
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_incoming_metadata,
+    )
+
+    report = ingest_library(config, no_ai=True)
+
+    assert report.locked_skipped == 1
+    assert report.records_written == 0
+    assert record_path.read_text(encoding="utf-8") == before_json
+    assert incoming_pdf.exists()
+    assert not list(config.paths.papers.rglob("*.pdf"))
+    assert not list(config.paths.text.glob("*.txt"))
+
+
+def test_ingest_exact_duplicate_locked_record_counts_locked_skipped(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    inbox = root / "inbox"
+    inbox.mkdir(parents=True)
+    pdf_path = inbox / "paper.pdf"
+    pdf_bytes = b"same locked fake pdf"
+    pdf_path.write_bytes(pdf_bytes)
+    config = _config(root)
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 2, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract,
+    )
+
+    first = ingest_library(config, no_ai=True)
+    assert first.records_written == 1
+    record_path = next(config.paths.records.glob("p_*.json"))
+    record = read_record(record_path)
+    record.review["locked"] = True
+    record.status["review"] = status.REVIEW_REVIEWED
+    write_record_atomic(record_path, record)
+    conn = db.connect(config.paths.db)
+    try:
+        db.upsert_paper(conn, record, f"records/{record.paper_id}.json")
+    finally:
+        conn.close()
+    before_json = record_path.read_text(encoding="utf-8")
+
+    pdf_path.write_bytes(pdf_bytes)
+    second = ingest_library(config, no_ai=True)
+
+    assert second.locked_skipped == 1
+    assert second.skipped_existing == 0
+    assert second.records_written == 0
+    assert pdf_path.exists()
+    assert record_path.read_text(encoding="utf-8") == before_json
+
+
+def test_ingest_restores_locked_fields_after_ai_output(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    config = _config(root)
+    config.ai.enabled = True
+    record = _existing_record()
+    record.metadata["title"].locked = True
+    record_path = _write_existing_alias_record(config, record)
+    incoming_pdf = config.paths.inbox / "incoming.pdf"
+    incoming_pdf.write_bytes(b"incoming fake pdf")
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_incoming_metadata,
+    )
+
+    def fake_summarise_record(
+        record, *, cleaned_text, source_file_hash, ai_config, no_ai
+    ):
+        record.metadata["title"].value = "AI Title"
+        record.metadata["title"].locked = False
+        return record, True, None
+
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.summarise_record",
+        fake_summarise_record,
+    )
+
+    report = ingest_library(config, no_ai=False)
+    updated = read_record(record_path)
+
+    assert report.records_written == 1
+    assert updated.metadata["title"].value == "Manual Title"
+    assert updated.metadata["title"].locked is True
 
 
 def test_broken_pdf_moves_to_failed_logs_failure_and_batch_continues(
