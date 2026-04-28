@@ -21,6 +21,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
 ]
+openai = [
+    "openai>=1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

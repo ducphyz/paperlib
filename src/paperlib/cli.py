@@ -12,6 +12,7 @@ from paperlib.logging_config import setup_logging
 from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import validate_pdf
+from paperlib.review import ReviewCancelled, review_record_interactive
 from paperlib.store import db
 from paperlib.store.json_store import (
     read_record,
@@ -49,11 +50,13 @@ def validate_config(config_path: str) -> None:
     click.echo("AI:")
     click.echo(f"enabled: {str(config.ai.enabled).lower()}")
     if config.ai.enabled and not config.ai.anthropic_api_key:
-        click.echo("ANTHROPIC_API_KEY: missing, non-AI commands still work")
+        click.echo(
+            f"{config.ai.api_key_env}: missing, non-AI commands still work"
+        )
     elif config.ai.enabled:
-        click.echo("ANTHROPIC_API_KEY: present")
+        click.echo(f"{config.ai.api_key_env}: present")
     else:
-        click.echo("ANTHROPIC_API_KEY: not required")
+        click.echo(f"{config.ai.api_key_env}: not required")
 
 
 @main.command("ingest")
@@ -289,6 +292,74 @@ def mark_reviewed(id_or_alias: str, config_path: str) -> None:
     click.echo(f"marked reviewed: {record.handle_id or record.paper_id}")
 
 
+@main.command("review")
+@click.argument("id_or_alias")
+@click.option("--config", "config_path", default="config.toml", show_default=True)
+def review(id_or_alias: str, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _require_library_root(config)
+    logger = _setup_command_logging(config, debug=False)
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    try:
+        try:
+            paper_id = db.resolve_id(conn, id_or_alias)
+        except db.IdNotFound as exc:
+            raise click.ClickException(str(exc)) from exc
+        record_path_value = db.get_record_path(conn, paper_id)
+    finally:
+        conn.close()
+
+    if record_path_value is None:
+        raise click.ClickException(f"Record path not found for: {paper_id}")
+
+    record_path = Path(record_path_value)
+    if not record_path.is_absolute():
+        record_path = config.library.root / record_path
+
+    try:
+        record = read_record(record_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        updated = review_record_interactive(
+            record,
+            input_func=_click_input,
+            output_func=click.echo,
+        )
+    except ReviewCancelled as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if updated is None:
+        return
+
+    write_record_atomic(record_path, updated)
+    logger.info(
+        "record reviewed: paper_id=%s handle_id=%s",
+        updated.paper_id,
+        updated.handle_id,
+    )
+
+    conn = db.connect(db_path)
+    try:
+        db.update_record_index(conn, updated, record_path_value)
+    finally:
+        conn.close()
+
+    click.echo(f"review saved: {updated.handle_id or updated.paper_id}")
+
+
 @main.command("list")
 @click.option("--needs-review", is_flag=True)
 @click.option("--no-handle", is_flag=True)
@@ -425,6 +496,16 @@ def _print_dry_run_table(pdfs) -> None:
                 ]
             )
         )
+
+
+def _click_input(prompt: str) -> str:
+    try:
+        value = click.prompt(prompt, default="", show_default=False)
+    except (click.Abort, EOFError, KeyboardInterrupt) as exc:
+        raise KeyboardInterrupt from exc
+    if value == "\x03":
+        raise KeyboardInterrupt
+    return value
 
 
 def _require_library_root(config: AppConfig) -> None:

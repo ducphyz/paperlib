@@ -269,6 +269,24 @@ def record_ingest_success(
         raise
 
 
+def update_record_index(
+    conn: sqlite3.Connection, record: PaperRecord | dict, record_path
+) -> None:
+    data = _record_dict(record)
+    try:
+        conn.execute("BEGIN")
+        _upsert_paper_sql(conn, data, record_path)
+        conn.execute(
+            "DELETE FROM aliases WHERE paper_id = ?",
+            (data["paper_id"],),
+        )
+        _insert_aliases_sql(conn, data["paper_id"], data["identity"]["aliases"])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _log_processing_run_sql(
     conn: sqlite3.Connection,
     file_hash: str | None,

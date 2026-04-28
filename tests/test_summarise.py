@@ -397,19 +397,17 @@ def _ai_config(enabled: bool = True):
     )
 
 
-def test_summarise_record_no_ai_does_not_call_anthropic_and_sets_skipped(
+def test_summarise_record_no_ai_does_not_call_ai_and_sets_skipped(
     monkeypatch,
 ):
     called = False
 
-    def fake_call_anthropic(*args, **kwargs):
+    def fake_call_ai(*args, **kwargs):
         nonlocal called
         called = True
-        raise AssertionError("must not call Anthropic")
+        raise AssertionError("must not call AI")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(paper_id="p_test")
 
     updated, success, error = summarise_record(
@@ -428,19 +426,17 @@ def test_summarise_record_no_ai_does_not_call_anthropic_and_sets_skipped(
     assert updated.status["summary"] == status_values.SUMMARY_SKIPPED
 
 
-def test_summarise_record_disabled_ai_does_not_call_anthropic_and_sets_skipped(
+def test_summarise_record_disabled_ai_does_not_call_ai_and_sets_skipped(
     monkeypatch,
 ):
     called = False
 
-    def fake_call_anthropic(*args, **kwargs):
+    def fake_call_ai(*args, **kwargs):
         nonlocal called
         called = True
-        raise AssertionError("must not call Anthropic")
+        raise AssertionError("must not call AI")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(paper_id="p_test")
 
     updated, success, error = summarise_record(
@@ -464,14 +460,12 @@ def test_summarise_record_locked_summary_does_not_call_or_modify_summary(
 ):
     called = False
 
-    def fake_call_anthropic(*args, **kwargs):
+    def fake_call_ai(*args, **kwargs):
         nonlocal called
         called = True
-        raise AssertionError("must not call Anthropic")
+        raise AssertionError("must not call AI")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(paper_id="p_test")
     record.summary["locked"] = True
     record.summary["status"] = status_values.SUMMARY_SKIPPED
@@ -499,14 +493,12 @@ def test_summarise_record_locked_summary_does_not_call_or_modify_summary(
 def test_summarise_record_locked_summary_preserves_manual_short(monkeypatch):
     called = False
 
-    def fake_call_anthropic(*args, **kwargs):
+    def fake_call_ai(*args, **kwargs):
         nonlocal called
         called = True
-        raise AssertionError("must not call Anthropic")
+        raise AssertionError("must not call AI")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(paper_id="p_test")
     record.summary["locked"] = True
     record.summary["short"] = "Manual summary"
@@ -530,14 +522,12 @@ def test_summarise_record_successful_mocked_ai_updates_summary(monkeypatch):
     model_output = json.dumps(_valid_model_output())
     captured = {}
 
-    def fake_call_anthropic(prompt, **kwargs):
+    def fake_call_ai(prompt, ai_config):
         captured["prompt"] = prompt
-        captured["kwargs"] = kwargs
+        captured["ai_config"] = ai_config
         return model_output
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(
         paper_id="p_test",
         identity=PaperIdentity(doi="10.1234/example", arxiv_id="2401.12345"),
@@ -556,11 +546,9 @@ def test_summarise_record_successful_mocked_ai_updates_summary(monkeypatch):
     assert error is None
     assert "10.1234/example" in captured["prompt"]
     assert "2401.12345" in captured["prompt"]
-    assert captured["kwargs"] == {
-        "model": "claude-test",
-        "max_tokens": 100,
-        "temperature": 0.2,
-    }
+    assert captured["ai_config"].model == "claude-test"
+    assert captured["ai_config"].max_tokens == 100
+    assert captured["ai_config"].temperature == 0.2
     assert updated.summary["status"] == status_values.SUMMARY_GENERATED
     assert updated.summary["model"] == "claude-test"
     assert updated.summary["prompt_version"] == "v1"
@@ -569,12 +557,10 @@ def test_summarise_record_successful_mocked_ai_updates_summary(monkeypatch):
 
 
 def test_summarise_record_ai_error_sets_failed_and_returns_error(monkeypatch):
-    def fake_call_anthropic(*args, **kwargs):
+    def fake_call_ai(*args, **kwargs):
         raise AIError("network unavailable")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
     record = PaperRecord(paper_id="p_test")
 
     updated, success, error = summarise_record(
@@ -598,7 +584,7 @@ def test_summarise_record_invalid_model_json_sets_failed_and_returns_error(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic",
+        "paperlib.pipeline.summarise.call_ai",
         lambda *args, **kwargs: "{not json",
     )
     record = PaperRecord(paper_id="p_test")
@@ -624,12 +610,10 @@ def test_summarise_record_error_message_does_not_contain_prompt_text(
 ):
     prompt_text = "SECRET PAPER TEXT"
 
-    def fake_call_anthropic(prompt, **kwargs):
+    def fake_call_ai(prompt, _ai_config):
         raise RuntimeError(f"failed while handling {prompt}")
 
-    monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fake_call_anthropic
-    )
+    monkeypatch.setattr("paperlib.pipeline.summarise.call_ai", fake_call_ai)
 
     _, success, error = summarise_record(
         PaperRecord(paper_id="p_test"),

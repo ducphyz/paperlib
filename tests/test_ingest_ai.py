@@ -166,9 +166,9 @@ def test_no_ai_does_not_call_summarise_record_or_anthropic(
         ),
     )
     monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic",
+        "paperlib.pipeline.summarise.call_ai",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("no_ai must not call Anthropic")
+            AssertionError("no_ai must not call AI")
         ),
     )
 
@@ -349,11 +349,11 @@ def test_ai_failure_does_not_break_persistence_with_real_ingest_path(
     pdf_path = config.paths.inbox / "synthetic.pdf"
     _write_minimal_pdf(pdf_path)
 
-    def fail_call_anthropic(*args, **kwargs):
+    def fail_call_ai(*args, **kwargs):
         raise AIError("deterministic AI failure")
 
     monkeypatch.setattr(
-        "paperlib.pipeline.summarise.call_anthropic", fail_call_anthropic
+        "paperlib.pipeline.summarise.call_ai", fail_call_ai
     )
 
     report = ingest_library(config, no_ai=False, dry_run=False)

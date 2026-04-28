@@ -15,6 +15,7 @@ from paperlib.pipeline.discover import DiscoveredPDF
 from paperlib.pipeline.extract import ExtractionResult
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.validate import ValidationResult
+from paperlib.review import review_record_interactive
 from paperlib.store import db
 from paperlib.store.json_store import read_record, write_record_atomic
 
@@ -452,6 +453,58 @@ def test_ingest_preserves_locked_metadata_field_on_existing_record(
     assert updated.metadata["title"].locked is True
     assert updated.metadata["authors"].value == ["New Author", "Second Author"]
     assert updated.metadata["year"].value == 2024
+
+
+def test_ingest_preserves_title_locked_by_interactive_review(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    config = _config(root)
+    record = _existing_record()
+    record_path = _write_existing_alias_record(config, record)
+    review_inputs = iter(
+        [
+            "Reviewed Title",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "n",
+            "y",
+        ]
+    )
+    reviewed = review_record_interactive(
+        record,
+        input_func=lambda _prompt: next(review_inputs),
+        output_func=lambda _line: None,
+        now="2026-04-28T00:00:00Z",
+    )
+    write_record_atomic(record_path, reviewed)
+    conn = db.connect(config.paths.db)
+    try:
+        db.update_record_index(conn, reviewed, f"records/{record.paper_id}.json")
+    finally:
+        conn.close()
+
+    incoming_pdf = config.paths.inbox / "incoming.pdf"
+    incoming_pdf.write_bytes(b"incoming fake pdf")
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.validate_pdf",
+        lambda path: ValidationResult(path, True, 1, True, "ok"),
+    )
+    monkeypatch.setattr(
+        "paperlib.pipeline.ingest.extract_text_from_pdf",
+        _fake_extract_with_incoming_metadata,
+    )
+
+    report = ingest_library(config, no_ai=True)
+    updated = read_record(record_path)
+
+    assert report.records_written == 1
+    assert updated.metadata["title"].value == "Reviewed Title"
+    assert updated.metadata["title"].locked is True
 
 
 def test_ingest_preserves_multiple_locked_metadata_fields(

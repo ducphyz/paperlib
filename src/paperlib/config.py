@@ -5,6 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from paperlib.ai.client import (
+    AIError,
+    OPENAI_COMPAT_PROVIDER,
+    OPENROUTER_DEFAULT_BASE_URL,
+    OPENROUTER_PROVIDER,
+    default_api_key_env,
+    split_model_string,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError as exc:  # pragma: no cover - Python 3.14.3 includes tomllib.
@@ -57,6 +66,8 @@ class AIConfig:
     max_tokens: int
     temperature: float
     anthropic_api_key: str | None
+    base_url: str | None = None
+    api_key_env: str | None = None
 
 
 @dataclass
@@ -95,6 +106,7 @@ def load_config(config_path: Path | str = "config.toml") -> AppConfig:
     pipeline_data = _section(data, "pipeline")
     extraction_data = _section(data, "extraction")
     ai_data = _section(data, "ai")
+    ai_config = _load_ai_config(ai_data)
 
     return AppConfig(
         library=LibraryConfig(root=root),
@@ -124,14 +136,36 @@ def load_config(config_path: Path | str = "config.toml") -> AppConfig:
             min_char_count=int(extraction_data.get("min_char_count", 500)),
             min_word_count=int(extraction_data.get("min_word_count", 100)),
         ),
-        ai=AIConfig(
-            enabled=bool(ai_data.get("enabled", True)),
-            provider=str(ai_data.get("provider", "anthropic")),
-            model=str(ai_data.get("model", "claude-sonnet-4-20250514")),
-            max_tokens=int(ai_data.get("max_tokens", 1200)),
-            temperature=float(ai_data.get("temperature", 0.2)),
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-        ),
+        ai=ai_config,
+    )
+
+
+def _load_ai_config(ai_data: dict[str, Any]) -> AIConfig:
+    model = str(ai_data.get("model", "claude-sonnet-4-20250514"))
+    try:
+        provider, _provider_model = split_model_string(model)
+    except AIError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    base_url = _optional_str(ai_data.get("base_url"))
+    if provider == OPENROUTER_PROVIDER and base_url is None:
+        base_url = OPENROUTER_DEFAULT_BASE_URL
+    if provider == OPENAI_COMPAT_PROVIDER and base_url is None:
+        raise ConfigError("openai-compat model requires ai.base_url")
+
+    api_key_env = _optional_str(ai_data.get("api_key_env"))
+    if api_key_env is None:
+        api_key_env = default_api_key_env(provider)
+
+    return AIConfig(
+        enabled=bool(ai_data.get("enabled", True)),
+        provider=str(ai_data.get("provider", provider)),
+        model=model,
+        max_tokens=int(ai_data.get("max_tokens", 1200)),
+        temperature=float(ai_data.get("temperature", 0.2)),
+        anthropic_api_key=os.getenv(api_key_env),
+        base_url=base_url,
+        api_key_env=api_key_env,
     )
 
 
@@ -140,6 +174,13 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(f"Config section must be a table: {name}")
     return value
+
+
+def _optional_str(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _resolve_path(root: Path, value: str) -> Path:

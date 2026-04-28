@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from paperlib.ai.client import AIError, call_anthropic
+from paperlib.ai.client import AIError, call_ai
 from paperlib.ai.prompts import SUMMARY_PROMPT_VERSION, build_summary_prompt
 from paperlib.models import status as status_values
 from paperlib.models.record import PaperRecord
@@ -77,12 +77,7 @@ def summarise_record(
             arxiv_id=record.identity.arxiv_id,
             max_chars=40000,
         )
-        raw_text = call_anthropic(
-            prompt,
-            model=ai_config.model,
-            max_tokens=ai_config.max_tokens,
-            temperature=ai_config.temperature,
-        )
+        raw_text = call_ai(prompt, ai_config)
         parsed = parse_model_json(raw_text)
         normalized = normalize_model_output(parsed)
         record = apply_ai_output_to_record(
