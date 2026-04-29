@@ -1,4 +1,4 @@
-# PaperLib v1.1 Release Notes
+# PaperLib v1.1 Source Inventory
 
 Feature milestone v1.1 is released as package version 0.1.1.
 
@@ -81,25 +81,6 @@ documentation time.
 | `tests/test_validate.py` | 102 | PDF validation success, failure, and sampled text behavior. |
 
 Total test Python lines: 6,011.
-
-## Release Validation Commands
-
-Use the module entry point in a source checkout:
-
-```bash
-PYTHONPATH=src python -m pytest
-PYTHONPATH=src python -m paperlib.cli --version
-PYTHONPATH=src python -m paperlib.cli --help
-PYTHONPATH=src python -m paperlib.cli validate-config --config config.example.toml
-```
-
-When the package is installed and the console script is available:
-
-```bash
-paperlib --version
-paperlib --help
-paperlib validate-config --config config.example.toml
-```
 
 ## Known Limitations
 

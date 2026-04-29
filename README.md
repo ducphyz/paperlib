@@ -257,5 +257,5 @@ paperlib ingest --config config.toml --no-ai
 - [Operations](docs/operations.md)
 - [Limitations](docs/limitations.md)
 - [Roadmap](docs/roadmap.md)
-- [v1.1 Release Notes](docs/release_v1.1.md) for package version 0.1.1
-- [Changelog](CHANGELOG.md)
+- [Source Inventory](docs/source_inventory.md)
+- [Changelog](CHANGELOG.md) for release history, including package version 0.1.1
