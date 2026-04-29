@@ -6,6 +6,8 @@ This project follows the spirit of Keep a Changelog.
 
 ## [v1.1] - 2026-04-28
 
+Feature milestone v1.1 is released as package version 0.1.1.
+
 ### Added
 
 - Embedded PDF metadata extraction for non-AI ingest, including title, authors,

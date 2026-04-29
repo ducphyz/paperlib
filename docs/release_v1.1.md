@@ -1,5 +1,7 @@
 # PaperLib v1.1 Release Notes
 
+Feature milestone v1.1 is released as package version 0.1.1.
+
 ## Scope
 
 PaperLib v1.1 rounds out the local-first paper library workflow. It adds

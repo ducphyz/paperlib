@@ -16,6 +16,7 @@ def test_changelog_exists_and_documents_v1_1():
     assert changelog.exists()
     text = changelog.read_text(encoding="utf-8")
     assert "v1.1" in text
+    assert "0.1.1" in text
     assert "handle_id" in text
     assert "SQLite schema" in text
 
@@ -37,6 +38,7 @@ def test_readme_documents_v1_1_workflows():
         "openrouter:",
         "openai-compat:",
         "Known Limitations",
+        "0.1.1",
     ):
         assert required in text
 
