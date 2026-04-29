@@ -1,5 +1,9 @@
+# This example validates from the repository root. After copying it to
+# config.toml, change library.root to your real PaperLib directory before
+# ingesting papers.
+
 [library]
-root = "/Users/you/PaperLibrary"
+root = "."
 
 [paths]
 inbox = "inbox"
@@ -23,7 +27,35 @@ min_word_count = 100
 
 [ai]
 enabled     = true
-provider    = "anthropic"
+provider    = "anthropic" # retained for backwards compatibility
+
+# Model prefix forms:
+# - no prefix: Anthropic, backwards-compatible default
+# - anthropic:<model>: Anthropic
+# - openai:<model>: OpenAI, requires paperlib[openai]
+# - openrouter:<model>: OpenRouter, requires paperlib[openai]
+# - openai-compat:<model>: custom OpenAI-compatible endpoint, requires base_url
+
+# Anthropic default.
 model       = "claude-sonnet-4-20250514"
 max_tokens  = 1200
 temperature = 0.2
+
+# Explicit Anthropic example.
+# model = "anthropic:claude-sonnet-4-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+
+# OpenAI example.
+# model = "openai:gpt-4o"
+# api_key_env = "OPENAI_API_KEY"
+
+# OpenRouter example. base_url is optional for openrouter because this is the
+# built-in default.
+# model = "openrouter:meta-llama/llama-3.3-70b-instruct"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+
+# Generic OpenAI-compatible example. base_url is required.
+# model = "openai-compat:local-model"
+# base_url = "http://localhost:11434/v1"
+# api_key_env = "LOCAL_AI_KEY"

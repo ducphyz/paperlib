@@ -1,8 +1,10 @@
 from pathlib import Path
 import json
+import tomllib
 
 from click.testing import CliRunner
 
+from paperlib.__about__ import __version__
 from paperlib.cli import main
 from paperlib.models.record import PaperRecord
 from paperlib.pipeline.discover import DiscoveredPDF
@@ -46,6 +48,148 @@ max_tokens = 1200
 temperature = 0.2
 """
     )
+
+
+def test_root_version_prints_project_version():
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert "paperlib" in result.output
+    assert __version__ in result.output
+
+
+def test_about_version_matches_pyproject():
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+    assert __version__ == data["project"]["version"]
+
+
+def test_root_help_lists_description_and_commands():
+    result = CliRunner().invoke(main, ["--help"])
+
+    assert result.exit_code == 0
+    assert "Usage: paperlib" in result.output
+    assert "Personal CLI tool" in result.output
+    for command in (
+        "validate-config",
+        "ingest",
+        "status",
+        "list",
+        "show",
+        "rebuild-index",
+        "mark-reviewed",
+        "review",
+    ):
+        assert command in result.output
+
+
+def test_each_command_help_exits_zero():
+    for command in (
+        "validate-config",
+        "ingest",
+        "status",
+        "list",
+        "show",
+        "rebuild-index",
+        "mark-reviewed",
+        "review",
+    ):
+        result = CliRunner().invoke(main, [command, "--help"])
+        assert result.exit_code == 0, command
+        assert "--config" in result.output
+
+
+def test_ingest_help_documents_core_options():
+    result = CliRunner().invoke(main, ["ingest", "--help"])
+
+    assert result.exit_code == 0
+    for option in ("--dry-run", "--no-ai", "--limit", "--debug"):
+        assert option in result.output
+
+
+def test_global_config_help_is_available():
+    result = CliRunner().invoke(main, ["--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.output
+
+
+def test_global_config_ingest_form_works(tmp_path: Path, monkeypatch):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "custom.toml"
+    _write_config(config_path, root)
+    calls = []
+
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        calls.append((config.library.root, limit, dry_run, no_ai))
+        return IngestReport(discovered=1, processed=1)
+
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--config",
+            str(config_path),
+            "ingest",
+            "--no-ai",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(root.resolve(), 1, False, True)]
+
+
+def test_per_command_config_ingest_form_still_works(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "custom.toml"
+    _write_config(config_path, root)
+    calls = []
+
+    def fake_ingest_library(config, *, limit, dry_run, no_ai):
+        calls.append((config.library.root, limit, dry_run, no_ai))
+        return IngestReport(discovered=1, processed=1)
+
+    monkeypatch.setattr("paperlib.cli.ingest_library", fake_ingest_library)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ingest",
+            "--config",
+            str(config_path),
+            "--no-ai",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(root.resolve(), 1, False, True)]
+
+
+def test_rebuild_index_help_documents_core_options():
+    result = CliRunner().invoke(main, ["rebuild-index", "--help"])
+
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+    assert "--no-backfill" in result.output
+
+
+def test_list_help_documents_existing_options():
+    result = CliRunner().invoke(main, ["list", "--help"])
+
+    assert result.exit_code == 0
+    assert "--needs-review" in result.output
+    assert "--no-handle" in result.output
+    assert "--sort" in result.output
 
 
 def _write_minimal_pdf(path: Path) -> None:

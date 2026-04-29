@@ -7,6 +7,7 @@ from pathlib import Path
 
 import click
 
+from paperlib.__about__ import __description__, __title__, __version__
 from paperlib.config import AppConfig, load_config
 from paperlib.logging_config import setup_logging
 from paperlib.pipeline.discover import discover_pdfs
@@ -21,14 +22,38 @@ from paperlib.store.json_store import (
 )
 
 
-@click.group()
-def main() -> None:
-    """paperlib command line interface."""
-    pass
+CONFIG_HELP = "Path to the PaperLib config TOML file."
 
 
-@main.command("validate-config")
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@click.group(name=__title__, help=__description__)
+@click.option(
+    "--config",
+    "global_config_path",
+    default=None,
+    help=CONFIG_HELP,
+)
+@click.version_option(__version__, prog_name=__title__)
+@click.pass_context
+def main(ctx: click.Context, global_config_path: str | None) -> None:
+    if global_config_path is None:
+        return
+
+    default_map = dict(ctx.default_map or {})
+    for command_name in main.commands:
+        command_defaults = dict(default_map.get(command_name, {}))
+        command_defaults.setdefault("config_path", global_config_path)
+        default_map[command_name] = command_defaults
+    ctx.default_map = default_map
+
+
+@main.command("validate-config", help="Validate config and runtime paths.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def validate_config(config_path: str) -> None:
     try:
         config = load_config(config_path)
@@ -59,12 +84,27 @@ def validate_config(config_path: str) -> None:
         click.echo(f"{config.ai.api_key_env}: not required")
 
 
-@main.command("ingest")
-@click.option("--dry-run", is_flag=True)
-@click.option("--limit", type=int, default=None)
-@click.option("--no-ai", is_flag=True)
-@click.option("--debug", is_flag=True)
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@main.command("ingest", help="Ingest PDFs from the configured inbox.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Discover and validate PDFs without writing files, DB rows, or AI calls.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Process at most this many discovered PDFs.",
+)
+@click.option("--no-ai", is_flag=True, help="Skip AI summarization for this run.")
+@click.option("--debug", is_flag=True, help="Write DEBUG-level log entries.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def ingest(
     dry_run: bool,
     limit: int | None,
@@ -104,11 +144,25 @@ def ingest(
     _print_ingest_report(report)
 
 
-@main.command("rebuild-index")
-@click.option("--dry-run", is_flag=True)
-@click.option("--no-backfill", is_flag=True)
-@click.option("--debug", is_flag=True)
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@main.command("rebuild-index", help="Rebuild SQLite from canonical JSON records.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report index and handle backfill changes without writing.",
+)
+@click.option(
+    "--no-backfill",
+    is_flag=True,
+    help="Do not write missing handle_id values back to JSON records.",
+)
+@click.option("--debug", is_flag=True, help="Write DEBUG-level log entries.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def rebuild_index(
     dry_run: bool,
     no_backfill: bool,
@@ -163,8 +217,14 @@ def rebuild_index(
         click.echo(f"backup: {result['backup_path']}")
 
 
-@main.command("status")
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@main.command("status", help="Show library and processing status counts.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def status(config_path: str) -> None:
     try:
         config = load_config(config_path)
@@ -196,9 +256,15 @@ def status(config_path: str) -> None:
     click.echo(f"{'summary failed:':<21}{counts['summary_failed']}")
 
 
-@main.command("show")
+@main.command("show", help="Show one paper record as JSON.")
 @click.argument("id_or_alias")
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def show(id_or_alias: str, config_path: str) -> None:
     try:
         config = load_config(config_path)
@@ -238,9 +304,15 @@ def show(id_or_alias: str, config_path: str) -> None:
     )
 
 
-@main.command("mark-reviewed")
+@main.command("mark-reviewed", help="Mark a record reviewed and lock it.")
 @click.argument("id_or_alias")
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def mark_reviewed(id_or_alias: str, config_path: str) -> None:
     try:
         config = load_config(config_path)
@@ -292,9 +364,15 @@ def mark_reviewed(id_or_alias: str, config_path: str) -> None:
     click.echo(f"marked reviewed: {record.handle_id or record.paper_id}")
 
 
-@main.command("review")
+@main.command("review", help="Interactively edit and lock paper metadata.")
 @click.argument("id_or_alias")
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def review(id_or_alias: str, config_path: str) -> None:
     try:
         config = load_config(config_path)
@@ -360,17 +438,32 @@ def review(id_or_alias: str, config_path: str) -> None:
     click.echo(f"review saved: {updated.handle_id or updated.paper_id}")
 
 
-@main.command("list")
-@click.option("--needs-review", is_flag=True)
-@click.option("--no-handle", is_flag=True)
+@main.command("list", help="List indexed papers.")
+@click.option(
+    "--needs-review",
+    is_flag=True,
+    help="Only show papers whose review status is needs_review.",
+)
+@click.option(
+    "--no-handle",
+    is_flag=True,
+    help="Hide the handle_id column.",
+)
 @click.option(
     "--sort",
     "sort_by",
     type=click.Choice(["year", "handle"]),
     default="year",
     show_default=True,
+    help="Sort papers by year or handle_id.",
 )
-@click.option("--config", "config_path", default="config.toml", show_default=True)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
 def list_command(
     needs_review: bool, no_handle: bool, sort_by: str, config_path: str
 ) -> None:

@@ -1,48 +1,50 @@
 # paperlib
 
-`paperlib` is a local Python CLI tool for ingesting PDFs into a structured
-personal paper library.
+PaperLib is a local-first Python CLI for ingesting, indexing, reviewing, and
+summarizing academic papers. It watches a configured `inbox/`, validates PDFs,
+extracts text and embedded metadata, creates canonical JSON records, moves PDFs
+to stable filenames, and maintains a rebuildable SQLite index.
 
-It scans an `inbox/`, validates PDFs, extracts and cleans text, detects DOI and
-arXiv identifiers, assigns stable internal `paper_id` values, moves PDFs to a
-canonical location, writes JSON records, and maintains a rebuildable SQLite
-index. Optional Anthropic AI can fill selected metadata fields and generate
-structured summaries.
+The current implementation is focused on a personal physics paper library, but
+the storage model is intentionally plain: JSON files are the source of truth and
+SQLite is only an index.
 
-## v1 Scope
+## Architecture
 
-In scope for v1:
+PaperLib stores each paper as a JSON record under `records/`. Those JSON records
+are canonical. If JSON and SQLite disagree, JSON wins.
 
-- scan `inbox/`
-- validate PDFs
-- extract and clean text
-- detect DOI and arXiv ID
-- assign stable `paper_id`
-- move PDFs to canonical location
-- write text files
-- write JSON records
-- update SQLite
-- optional AI summary
-- CLI commands
+SQLite is rebuildable:
 
-Out of scope for v1:
+```bash
+paperlib rebuild-index
+```
 
-- OCR
-- RAG
-- embeddings
-- GUI
-- Crossref, arXiv, or Semantic Scholar lookup
-- fuzzy duplicate detection
+The two main identifiers are:
+
+- `paper_id`: immutable internal identity, assigned as `p_<hash16>` on first
+  ingest.
+- `handle_id`: human-friendly identity such as `smith_2014`, generated from
+  author and year when possible.
+
+PaperLib also stores aliases such as `doi:...`, `arxiv:...`, and
+`hash:<hash16>` for lookup.
 
 ## Installation
 
-Use a conda environment for the supported Python runtime:
+Use a Python environment matching the supported runtime:
 
 ```bash
 conda create -n paperlib python=3.14.3 -y
 conda activate paperlib
 python -m pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
+```
+
+Install the optional OpenAI-compatible dependency only when needed:
+
+```bash
+pip install -e ".[openai]"
 ```
 
 ## Configuration
@@ -54,60 +56,165 @@ cp config.example.toml config.toml
 cp .env.example .env
 ```
 
-Edit `config.toml` and set `library.root` to the existing directory that will
-hold the paper library.
+Edit `config.toml` and set `library.root` to the existing directory that should
+hold the paper library. `validate-config` creates runtime subdirectories such as
+`inbox/`, `papers/`, `records/`, `text/`, `db/`, `logs/`, and `failed/`.
 
-Set `ANTHROPIC_API_KEY` in `.env` only if you plan to use AI summaries. Non-AI
-commands do not require an API key.
+```bash
+paperlib validate-config --config config.toml
+```
 
-## Quick Start
+The checked-in `config.example.toml` is intentionally self-validating from the
+repository root. Change `library.root` before using it for a real library.
 
-Create the library root directory first. If the root exists, `validate-config`
-creates the runtime subdirectories such as `inbox/`, `papers/`, `records/`,
-`text/`, `db/`, and `failed/`.
+## Basic Workflow
+
+Validate the configuration:
 
 ```bash
 paperlib validate-config
 ```
 
-Put PDFs into the library `inbox/`, then inspect what would happen:
+Put PDFs into the configured `inbox/`, inspect the batch, then ingest a small
+non-AI sample:
 
 ```bash
 paperlib ingest --dry-run
+paperlib ingest --no-ai --limit 3
 ```
 
-Run a non-AI ingest:
+Inspect records:
 
 ```bash
-paperlib ingest --no-ai
-```
-
-Inspect the library:
-
-```bash
-paperlib status
 paperlib list
-paperlib show <paper_id>
+paperlib show <handle_id>
 ```
 
-## AI Usage
-
-Use `--no-ai` to avoid AI entirely:
+Rebuild SQLite from JSON at any time:
 
 ```bash
-paperlib ingest --no-ai
+paperlib rebuild-index
 ```
 
-Without `--no-ai`, `paperlib ingest` attempts AI summarization when
-`ai.enabled = true` in `config.toml`.
+Review records:
 
-If the API key is missing, non-AI commands still work. AI summary generation
-will fail for affected records, but ingest continues and records are still
-written.
+```bash
+paperlib mark-reviewed <handle_id>
+paperlib review <handle_id>
+```
+
+## Identifiers
+
+`paper_id` is permanent and internal. It is derived from the first 16 hex
+characters of the PDF hash, for example:
+
+```text
+p_0440c911081cc43b
+```
+
+`handle_id` is for humans. It is generated from the first author surname and
+year when available:
+
+```text
+smith_2014
+smith_2014_b
+paper_0440c911
+```
+
+Use `paperlib show` with any supported identifier:
+
+```bash
+paperlib show smith_2014
+paperlib show p_0440c911081cc43b
+paperlib show doi:10.1234/example
+paperlib show arxiv:2401.12345
+paperlib show hash:0440c911081cc43b
+```
+
+`paperlib list` shows `handle_id` by default. Use `--no-handle` to hide it or
+`--sort handle` to sort by handle.
+
+## Ingest Behavior
+
+Non-AI ingest uses embedded PDF metadata and conservative filename heuristics to
+populate title, authors, and year when possible. Unknown metadata remains
+`null`; PaperLib does not fabricate values.
+
+Canonical PDF paths keep the year directory and use author-first filenames:
+
+```text
+papers/2014/smith_2014_abcd1234.pdf
+```
+
+When AI is enabled, AI output may fill unlocked metadata fields and generate a
+structured summary. AI never overwrites locked metadata fields.
+
+## Review Workflow
+
+New records start with `status.review = "needs_review"`.
+
+Use `paperlib review <id>` for an interactive metadata review. Blank input keeps
+the current value, a new value is stored as `source = "user"` with confidence
+`1.0`, and `!` locks an existing metadata value without changing it.
+
+Use `paperlib mark-reviewed <id>` to mark the whole record as reviewed. This
+sets:
+
+```text
+status.review = "reviewed"
+review.locked = true
+```
+
+Locked metadata fields survive re-ingest. A fully locked record is skipped on
+re-ingest so reviewed human edits are not overwritten.
+
+## AI Configuration
+
+AI provider selection is controlled by the `model` prefix in `[ai]`:
+
+- No prefix: Anthropic, for backwards compatibility.
+- `anthropic:...`: Anthropic.
+- `openai:...`: OpenAI.
+- `openrouter:...`: OpenRouter through the OpenAI-compatible API.
+- `openai-compat:...`: any OpenAI-compatible endpoint; requires `base_url`.
+
+Default API key environment variables:
+
+- Anthropic: `ANTHROPIC_API_KEY`
+- OpenAI: `OPENAI_API_KEY`
+- OpenRouter: `OPENROUTER_API_KEY`
+- OpenAI-compatible: `OPENAI_API_KEY` unless `api_key_env` is set.
+
+Examples:
+
+```toml
+[ai]
+enabled = true
+model = "claude-sonnet-4-20250514"
+
+# model = "anthropic:claude-sonnet-4-5"
+# model = "openai:gpt-4o"
+# model = "openrouter:meta-llama/llama-3.3-70b-instruct"
+# model = "openai-compat:local-model"
+# base_url = "http://localhost:11434/v1"
+# api_key_env = "LOCAL_AI_KEY"
+```
+
+For OpenAI, OpenRouter, and OpenAI-compatible providers, install:
+
+```bash
+pip install -e ".[openai]"
+```
+
+AI failures are non-fatal. Ingest continues, writes the record, and marks the
+summary as failed.
 
 ## CLI Reference
 
 ```bash
+paperlib --version
+paperlib --help
+paperlib --config config.toml ingest --no-ai --limit 3
 paperlib validate-config
 paperlib ingest
 paperlib ingest --dry-run
@@ -116,27 +223,31 @@ paperlib ingest --limit N
 paperlib status
 paperlib list
 paperlib list --needs-review
+paperlib list --sort handle
 paperlib show <id_or_alias>
 paperlib rebuild-index
+paperlib rebuild-index --dry-run
+paperlib rebuild-index --no-backfill
+paperlib mark-reviewed <id_or_alias>
+paperlib review <id_or_alias>
 ```
 
-`show` accepts a `paper_id` such as `p_abc123...` or a stored alias such as
-`arxiv:2401.12345`, `doi:10.xxxx/example`, or `hash:<hash16>`.
-
-## Source of Truth
-
-JSON records in `records/` are canonical. SQLite is a rebuildable index over
-those records:
+Per-command `--config` remains supported:
 
 ```bash
-paperlib rebuild-index
+paperlib ingest --config config.toml --no-ai
 ```
 
-## Safety
+## Known Limitations
 
-Unknown metadata is stored as `null`. `paperlib` must not fabricate missing
-metadata. Placeholder strings such as `unknown_year` and `unknown_author` are
-used only for filenames, not metadata values.
+- No OCR. Scanned PDFs are detected but not text-extracted.
+- No first-page text title/author heuristic yet; v1.1 uses embedded metadata
+  and conservative filename heuristics.
+- No vector database, embeddings, or RAG in v1.1.
+- No external metadata APIs such as Crossref, Semantic Scholar, or arXiv lookup.
+- Embedded metadata is often incomplete or wrong and may still require review.
+- No web UI or TUI.
+- Provider-aware token and cost accounting is not implemented.
 
 ## Documentation
 
@@ -146,3 +257,5 @@ used only for filenames, not metadata values.
 - [Operations](docs/operations.md)
 - [Limitations](docs/limitations.md)
 - [Roadmap](docs/roadmap.md)
+- [v1.1 Release Notes](docs/release_v1.1.md)
+- [Changelog](CHANGELOG.md)

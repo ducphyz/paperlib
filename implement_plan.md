@@ -1016,3 +1016,27 @@ Keep brief. Write these only after implementation is complete so they describe w
 7. Phase gates are mandatory. Do not accumulate unverified work across phases.
 
 Start Phase 1.
+
+---
+
+## v1.1 Update Note
+
+The implemented v1.1 work extends the original v1 plan without changing JSON
+`schema_version`:
+
+- Non-AI ingest now uses embedded PDF metadata and conservative filename
+  heuristics for title, authors, and year.
+- Canonical PDF filenames use `{author}_{year}_{hash8}.pdf` under the existing
+  `papers/{year}/` directory layout.
+- CLI logging is active for ingest and maintenance commands.
+- `handle_id` is a user-facing identifier separate from immutable `paper_id`.
+- SQLite migrates to schema version 2 for the nullable unique `handle_id`
+  column and index.
+- `rebuild-index` can backfill `handle_id` into JSON and SQLite.
+- `show`, `list`, and ID resolution support `handle_id`.
+- `mark-reviewed` and interactive `review` support human review and locking.
+- Locked metadata fields survive re-ingest; fully locked reviewed records are
+  skipped.
+- AI calls are dispatched by model prefix across Anthropic, OpenAI, OpenRouter,
+  and generic OpenAI-compatible endpoints.
+- CLI help, global `--config`, and `paperlib --version` are available.
