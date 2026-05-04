@@ -5,11 +5,15 @@ config.toml
 *.log
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .venv/
 dist/
 build/
 *.egg-info/
 .DS_Store
+.vscode/
+.idea/
 PaperLibrary/
 library/
 runtime/
