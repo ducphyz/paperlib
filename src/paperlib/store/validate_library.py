@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paperlib.config import AppConfig
-from paperlib.cli import _resolve_library_path
 from paperlib.store.db import list_all_paper_rows
 from paperlib.store.json_store import read_record
+from paperlib.utils import resolve_library_path
 
 
 @dataclass
@@ -59,7 +59,7 @@ def validate_library(config: AppConfig) -> list[Finding]:
                 for file_entry in record_dict.get('files', []):
                     cp = file_entry.get('canonical_path')
                     if cp:
-                        canonical_path = _resolve_library_path(
+                        canonical_path = resolve_library_path(
                             config.library.root, cp
                         )
                         json_canonical_paths.add(canonical_path.resolve())
@@ -74,7 +74,7 @@ def validate_library(config: AppConfig) -> list[Finding]:
 
                     text_path = file_entry.get('text_path')
                     if text_path:
-                        resolved_text_path = _resolve_library_path(
+                        resolved_text_path = resolve_library_path(
                             config.library.root, text_path
                         )
                         if not resolved_text_path.exists():
@@ -98,7 +98,7 @@ def validate_library(config: AppConfig) -> list[Finding]:
     # Check for database records whose record_path does not resolve to a file (DB_NOT_IN_JSON)
     for paper_row in paper_rows:
         record_path = paper_row['record_path']
-        resolved_path = _resolve_library_path(config.library.root, record_path)
+        resolved_path = resolve_library_path(config.library.root, record_path)
         
         if not resolved_path.exists():
             findings.append(Finding("error", "DB_NOT_IN_JSON", f"Database record_path {record_path} does not resolve to an existing file"))

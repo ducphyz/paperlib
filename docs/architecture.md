@@ -14,6 +14,9 @@ those records.
   extraction, cleaning, metadata detection, summarisation, and orchestration.
 - `paperlib.pipeline.lookup` calls Crossref and arXiv APIs to fill metadata
   fields during ingest.
+- `paperlib.utils` provides shared utilities (`utc_now`, `field_exists`,
+  `metadata_status`, `resolve_library_path`) used across pipeline, store, and
+  CLI modules.
 - `paperlib.export` formats records as BibTeX.
 - `paperlib.store` contains filesystem helpers, atomic text and JSON writes,
   SQLite indexing, and schema migrations.

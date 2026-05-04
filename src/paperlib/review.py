@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Callable
 
 from paperlib.models import status as status_values
 from paperlib.models.identity import normalize_arxiv_id, normalize_doi
 from paperlib.models.record import PaperRecord
+from paperlib.utils import utc_now
 
 
 InputFunc = Callable[[str], str]
@@ -33,7 +33,7 @@ def review_record_interactive(
     now: str | None = None,
 ) -> PaperRecord | None:
     updated = deepcopy(record)
-    now = now or _utc_now()
+    now = now or utc_now()
     changes: list[ReviewChange] = []
 
     if _is_already_reviewed(updated):
@@ -293,9 +293,3 @@ def _format_value(value) -> str:
 
 def _format_confidence(value) -> str:
     return "<none>" if value is None else str(value)
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )

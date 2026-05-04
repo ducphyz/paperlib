@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from paperlib.models import status as status_values
 from paperlib.models.record import PaperRecord
@@ -37,3 +38,10 @@ def metadata_status(record: PaperRecord) -> str:
     ]):
         return status_values.METADATA_PARTIAL
     return status_values.METADATA_PENDING
+
+
+def resolve_library_path(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path

@@ -20,10 +20,10 @@ from paperlib.store import db
 from paperlib.store.fs import move_to_deleted
 from paperlib.store.json_store import (
     read_record,
-    read_record_dict,
     write_record_atomic,
 )
-from paperlib.utils import utc_now
+from paperlib.store.validate_library import validate_library
+from paperlib.utils import resolve_library_path, utc_now
 
 
 CONFIG_HELP = "Path to the PaperLib config TOML file."
@@ -112,8 +112,6 @@ def validate_library_command(config_path: str) -> None:
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
-    from paperlib.store.validate_library import validate_library
-
     findings = validate_library(config)
     if not findings:
         click.echo("ok — no issues found")
@@ -173,19 +171,12 @@ def resummarise_command(id_or_alias: str | None, limit: int | None, no_ai: bool,
     try:
         if id_or_alias:
             # Process specific record - ignore summary_status and re-summarise regardless
-            try:
-                paper_id = db.resolve_id(conn, id_or_alias)
-            except db.IdNotFound as exc:
-                raise click.ClickException(str(exc)) from exc
+            record = _load_record_by_id(conn, config, id_or_alias)
+            paper_id = record.paper_id
             record_path_value = db.get_record_path(conn, paper_id)
             if record_path_value is None:
                 raise click.ClickException(f"Record path not found for: {paper_id}")
-            
-            # Resolve relative path against library root
-            record_path = Path(record_path_value)
-            if not record_path.is_absolute():
-                record_path = config.library.root / record_path
-            
+
             # Process this specific record directly
             candidate = {'paper_id': paper_id, 'record_path': record_path_value, 'handle_id': id_or_alias}
             candidates = [candidate]
@@ -193,20 +184,9 @@ def resummarise_command(id_or_alias: str | None, limit: int | None, no_ai: bool,
             
             paper_id = candidate['paper_id']
             record_path_str = candidate['record_path']
-            
-            # Resolve relative path against library root
-            record_path = Path(record_path_str)
-            if not record_path.is_absolute():
-                record_path = config.library.root / record_path
+            record_path = resolve_library_path(config.library.root, record_path_str)
 
             try:
-                try:
-                    record = read_record(record_path)
-                except Exception as exc:
-                    raise click.ClickException(
-                        f"Could not read record {record_path}: {exc}"
-                    ) from exc
-                
                 # Skip if record.summary["locked"] is True
                 if record.summary.get("locked", False):
                     skipped_locked_count += 1
@@ -287,11 +267,10 @@ def resummarise_command(id_or_alias: str | None, limit: int | None, no_ai: bool,
             for candidate in candidates:
                 paper_id = candidate['paper_id']
                 record_path_str = candidate['record_path']
-                
-                # Resolve relative path against library root
-                record_path = Path(record_path_str)
-                if not record_path.is_absolute():
-                    record_path = config.library.root / record_path
+                record_path = resolve_library_path(
+                    config.library.root,
+                    record_path_str,
+                )
 
                 try:
                     record = read_record(record_path)
@@ -579,11 +558,13 @@ def _load_record_by_id(
     record_path_value = db.get_record_path(conn, paper_id)
     if record_path_value is None:
         raise click.ClickException(f"Record path not found for: {paper_id}")
-    record_path = _resolve_library_path(config.library.root, record_path_value)
+    record_path = resolve_library_path(config.library.root, record_path_value)
     try:
         return read_record(record_path)
     except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            f"Could not read record {record_path}: {exc}"
+        ) from exc
 
 
 @main.command("show", help="Show one paper record as JSON.")
@@ -609,28 +590,16 @@ def show(id_or_alias: str, config_path: str) -> None:
 
     conn = db.connect(db_path)
     try:
-        try:
-            paper_id = db.resolve_id(conn, id_or_alias)
-        except db.IdNotFound as exc:
-            raise click.ClickException(str(exc)) from exc
-        record_path_value = db.get_record_path(conn, paper_id)
+        record = _load_record_by_id(conn, config, id_or_alias)
     finally:
         conn.close()
 
-    if record_path_value is None:
-        raise click.ClickException(f"Record path not found for: {paper_id}")
-
-    record_path = Path(record_path_value)
-    if not record_path.is_absolute():
-        record_path = config.library.root / record_path
-
-    try:
-        record = read_record_dict(record_path)
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
-
     click.echo(
-        json.dumps(_format_show_record(record), indent=2, ensure_ascii=False)
+        json.dumps(
+            _format_show_record(record.to_dict()),
+            indent=2,
+            ensure_ascii=False,
+        )
     )
 
 
@@ -668,7 +637,7 @@ def delete(id_or_alias: str, config_path: str) -> None:
     if record_path_value is None:
         raise click.ClickException(f"Record path not found for: {paper_id}")
 
-    record_path = _resolve_library_path(config.library.root, record_path_value)
+    record_path = resolve_library_path(config.library.root, record_path_value)
 
     try:
         record = read_record(record_path)
@@ -682,7 +651,7 @@ def delete(id_or_alias: str, config_path: str) -> None:
         conn.close()
 
     for file_record in record.files:
-        pdf_path = _resolve_library_path(
+        pdf_path = resolve_library_path(
             config.library.root,
             file_record.canonical_path,
         )
@@ -692,7 +661,7 @@ def delete(id_or_alias: str, config_path: str) -> None:
             click.echo(f"Warning: canonical PDF missing: {pdf_path}")
 
     for file_record in record.files:
-        text_path = _resolve_library_path(
+        text_path = resolve_library_path(
             config.library.root,
             file_record.text_path,
         )
@@ -725,25 +694,17 @@ def mark_reviewed(id_or_alias: str, config_path: str) -> None:
 
     conn = db.connect(db_path)
     try:
-        try:
-            paper_id = db.resolve_id(conn, id_or_alias)
-        except db.IdNotFound as exc:
-            raise click.ClickException(str(exc)) from exc
-        record_path_value = db.get_record_path(conn, paper_id)
+        record = _load_record_by_id(conn, config, id_or_alias)
+        record_path_value = db.get_record_path(conn, record.paper_id)
     finally:
         conn.close()
 
     if record_path_value is None:
-        raise click.ClickException(f"Record path not found for: {paper_id}")
+        raise click.ClickException(
+            f"Record path not found for: {record.paper_id}"
+        )
 
-    record_path = Path(record_path_value)
-    if not record_path.is_absolute():
-        record_path = config.library.root / record_path
-
-    try:
-        record = read_record(record_path)
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+    record_path = resolve_library_path(config.library.root, record_path_value)
 
     now = utc_now()
     record.status["review"] = "reviewed"
@@ -788,25 +749,17 @@ def review(id_or_alias: str, config_path: str) -> None:
 
     conn = db.connect(db_path)
     try:
-        try:
-            paper_id = db.resolve_id(conn, id_or_alias)
-        except db.IdNotFound as exc:
-            raise click.ClickException(str(exc)) from exc
-        record_path_value = db.get_record_path(conn, paper_id)
+        record = _load_record_by_id(conn, config, id_or_alias)
+        record_path_value = db.get_record_path(conn, record.paper_id)
     finally:
         conn.close()
 
     if record_path_value is None:
-        raise click.ClickException(f"Record path not found for: {paper_id}")
+        raise click.ClickException(
+            f"Record path not found for: {record.paper_id}"
+        )
 
-    record_path = Path(record_path_value)
-    if not record_path.is_absolute():
-        record_path = config.library.root / record_path
-
-    try:
-        record = read_record(record_path)
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+    record_path = resolve_library_path(config.library.root, record_path_value)
 
     try:
         updated = review_record_interactive(
@@ -1082,13 +1035,6 @@ def _setup_command_logging(config: AppConfig, *, debug: bool) -> logging.Logger:
 
 def _format_year(value) -> str:
     return "<unknown>" if value is None else str(value)
-
-
-def _resolve_library_path(root: Path, value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return root / path
 
 
 def _format_list_header(*, include_handle: bool) -> str:
