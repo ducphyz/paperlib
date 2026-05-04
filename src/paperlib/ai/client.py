@@ -127,6 +127,9 @@ def call_anthropic(
     return text
 
 
+from openai import OpenAI
+
+
 def call_openai_compatible(
     prompt: str,
     *,
@@ -137,11 +140,6 @@ def call_openai_compatible(
     temperature: float,
     timeout_s: int = 60,
 ) -> str:
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise AIError("install paperlib[openai] to use this provider") from exc
-
     try:
         kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout_s}
         if base_url is not None:

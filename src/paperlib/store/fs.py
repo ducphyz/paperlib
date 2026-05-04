@@ -22,6 +22,7 @@ def ensure_runtime_dirs(config: AppConfig) -> None:
         paths.db.parent,
         paths.logs,
         paths.failed,
+        paths.deleted,
         paths.duplicates,
     ):
         path.mkdir(parents=True, exist_ok=True)
@@ -187,6 +188,13 @@ def move_file(src: Path, dst: Path) -> None:
 def move_to_failed(src: Path, failed_dir: Path) -> Path:
     failed_dir.mkdir(parents=True, exist_ok=True)
     destination = _unique_destination(failed_dir / src.name)
+    move_file(src, destination)
+    return destination
+
+
+def move_to_deleted(src: Path, deleted_dir: Path) -> Path:
+    deleted_dir.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(deleted_dir / src.name)
     move_file(src, destination)
     return destination
 

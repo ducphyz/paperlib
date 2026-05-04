@@ -383,6 +383,40 @@ def test_list_papers_can_sort_by_handle_id(tmp_path: Path):
     ]
 
 
+def test_list_all_paper_rows_returns_identity_and_record_path(tmp_path: Path):
+    conn = _conn(tmp_path)
+    record = _record("p_abc")
+    record["handle_id"] = "ada_2024"
+    db.upsert_paper(conn, record, "records/p_abc.json")
+
+    rows = db.list_all_paper_rows(conn)
+
+    assert rows == [
+        {
+            "paper_id": "p_abc",
+            "record_path": "records/p_abc.json",
+            "handle_id": "ada_2024",
+        }
+    ]
+
+
+def test_list_all_file_rows_returns_paths(tmp_path: Path):
+    conn = _conn(tmp_path)
+    db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
+    db.insert_file(conn, "p_abc", _file("f" * 64))
+
+    rows = db.list_all_file_rows(conn)
+
+    assert rows == [
+        {
+            "file_hash": "f" * 64,
+            "paper_id": "p_abc",
+            "canonical_path": "papers/2024/paper.pdf",
+            "text_path": "text/aaaaaaaaaaaaaaaa.txt",
+        }
+    ]
+
+
 def test_get_status_counts(tmp_path: Path):
     conn = _conn(tmp_path)
     db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
@@ -428,6 +462,37 @@ def test_get_status_counts_returns_all_required_values(tmp_path: Path):
         "summary_pending": 1,
         "summary_failed": 1,
     }
+
+
+def test_delete_paper_removes_rows_across_index_tables(tmp_path: Path):
+    conn = _conn(tmp_path)
+    record = _record("p_delete")
+    record["identity"]["aliases"] = [
+        "doi:10.1234/delete",
+        "arxiv:2401.99999",
+    ]
+    file_record = _file("d" * 64)
+    db.upsert_paper(conn, record, "records/p_delete.json")
+    db.insert_aliases(conn, "p_delete", record["identity"]["aliases"])
+    db.insert_file(conn, "p_delete", file_record)
+    db.log_processing_run(
+        conn, file_record["file_hash"], "p_delete", "ingest", "ok", None
+    )
+
+    db.delete_paper(conn, "p_delete")
+
+    for table in ("processing_runs", "aliases", "files", "papers"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_delete_paper_unknown_id_is_noop(tmp_path: Path):
+    conn = _conn(tmp_path)
+    record = _record("p_keep")
+    db.upsert_paper(conn, record, "records/p_keep.json")
+
+    db.delete_paper(conn, "p_missing")
+
+    assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 1
 
 
 def test_rebuild_index_from_records_loads_valid_records_and_skips_errors(
@@ -714,3 +779,115 @@ def test_rebuild_index_no_backfill_indexes_existing_json_only(tmp_path: Path):
     finally:
         conn.close()
     assert row["handle_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# search_papers tests
+# ---------------------------------------------------------------------------
+
+def test_search_papers_matches_by_title(tmp_path: Path):
+    conn = _conn(tmp_path)
+    rec = _record("p_q1")
+    rec["metadata"]["title"]["value"] = "Quantum Computing"
+    db.upsert_paper(conn, rec, "records/p_q1.json")
+    rows = db.search_papers(conn, "Quantum")
+    assert len(rows) == 1
+    assert rows[0]["paper_id"] == "p_q1"
+
+
+def test_search_papers_matches_by_authors_json(tmp_path: Path):
+    conn = _conn(tmp_path)
+    rec = _record("p_e1")
+    rec["metadata"]["authors"]["value"] = ["Einstein, A."]
+    db.upsert_paper(conn, rec, "records/p_e1.json")
+    rows = db.search_papers(conn, "Einstein")
+    assert len(rows) == 1
+    assert rows[0]["paper_id"] == "p_e1"
+
+
+def test_search_papers_no_match_returns_empty(tmp_path: Path):
+    conn = _conn(tmp_path)
+    db.upsert_paper(conn, _record("p_z1"), "records/p_z1.json")
+    rows = db.search_papers(conn, "zzznomatch999")
+    assert rows == []
+
+
+def test_search_papers_literal_percent_is_not_wildcard(tmp_path: Path):
+    conn = _conn(tmp_path)
+    r_pct = _record("p_pct")
+    r_pct["metadata"]["title"]["value"] = "100% efficiency"
+    r_other = _record("p_oth1")
+    r_other["metadata"]["title"]["value"] = "full efficiency gain"
+    db.upsert_paper(conn, r_pct, "records/p_pct.json")
+    db.upsert_paper(conn, r_other, "records/p_oth1.json")
+
+    rows = db.search_papers(conn, "100%")
+    assert len(rows) == 1
+    assert rows[0]["paper_id"] == "p_pct"
+
+
+def test_search_papers_literal_underscore_is_not_wildcard(tmp_path: Path):
+    conn = _conn(tmp_path)
+    r_under = _record("p_usc")
+    r_under["metadata"]["title"]["value"] = "under_score paper"
+    r_other = _record("p_oth2")
+    r_other["metadata"]["title"]["value"] = "underfull score paper"
+    db.upsert_paper(conn, r_under, "records/p_usc.json")
+    db.upsert_paper(conn, r_other, "records/p_oth2.json")
+
+    rows = db.search_papers(conn, "under_")
+    assert len(rows) == 1
+    assert rows[0]["paper_id"] == "p_usc"
+
+
+def test_search_papers_is_case_insensitive(tmp_path: Path):
+    conn = _conn(tmp_path)
+    rec = _record("p_case")
+    rec["metadata"]["title"]["value"] = "UPPERCASE TITLE"
+    db.upsert_paper(conn, rec, "records/p_case.json")
+
+    rows = db.search_papers(conn, "uppercase title")
+    assert len(rows) == 1
+    assert rows[0]["paper_id"] == "p_case"
+
+
+def test_search_papers_sort_year_orders_desc(tmp_path: Path):
+    conn = _conn(tmp_path)
+    for pid, yr in [("p_2020s", 2020), ("p_2024s", 2024), ("p_2022s", 2022)]:
+        rec = _record(pid)
+        rec["metadata"]["title"]["value"] = "Sort Year Paper"
+        rec["metadata"]["year"]["value"] = yr
+        db.upsert_paper(conn, rec, f"records/{pid}.json")
+
+    rows = db.search_papers(conn, "Sort Year", sort="year")
+    years = [r["year"] for r in rows]
+    assert years == sorted(years, reverse=True)
+
+
+def test_search_papers_sort_handle_orders_asc(tmp_path: Path):
+    conn = _conn(tmp_path)
+    for pid, hdl in [("p_zzz", "zzz_2024"), ("p_aaa", "aaa_2024"), ("p_mmm", "mmm_2024")]:
+        rec = _record(pid)
+        rec["handle_id"] = hdl
+        rec["metadata"]["title"]["value"] = "Sort Handle Paper"
+        db.upsert_paper(conn, rec, f"records/{pid}.json")
+
+    rows = db.search_papers(conn, "Sort Handle", sort="handle")
+    handles = [r["handle_id"] for r in rows]
+    assert handles == sorted(handles)
+
+
+def test_search_papers_multiple_matches_returns_all(tmp_path: Path):
+    conn = _conn(tmp_path)
+    for pid in ["p_m1", "p_m2", "p_m3"]:
+        rec = _record(pid)
+        rec["metadata"]["title"]["value"] = "Shared Topic Paper"
+        db.upsert_paper(conn, rec, f"records/{pid}.json")
+    # non-matching record
+    other = _record("p_nomatch")
+    other["metadata"]["title"]["value"] = "Different Subject"
+    db.upsert_paper(conn, other, "records/p_nomatch.json")
+
+    rows = db.search_papers(conn, "Shared Topic")
+    assert len(rows) == 3
+    assert {r["paper_id"] for r in rows} == {"p_m1", "p_m2", "p_m3"}

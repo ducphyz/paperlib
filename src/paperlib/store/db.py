@@ -287,6 +287,22 @@ def update_record_index(
         raise
 
 
+def delete_paper(conn: sqlite3.Connection, paper_id: str) -> None:
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            "DELETE FROM processing_runs WHERE paper_id = ?",
+            (paper_id,),
+        )
+        conn.execute("DELETE FROM aliases WHERE paper_id = ?", (paper_id,))
+        conn.execute("DELETE FROM files WHERE paper_id = ?", (paper_id,))
+        conn.execute("DELETE FROM papers WHERE paper_id = ?", (paper_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _log_processing_run_sql(
     conn: sqlite3.Connection,
     file_hash: str | None,
@@ -395,6 +411,40 @@ def list_papers(
         FROM papers
         {where}
         ORDER BY {order_by}
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_all_paper_rows(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT paper_id, record_path, handle_id
+        FROM papers
+        ORDER BY paper_id
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_all_record_paths(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return (paper_id, record_path) for every row, ordered by paper_id."""
+    rows = conn.execute(
+        """
+        SELECT paper_id, record_path
+        FROM papers
+        ORDER BY paper_id
+        """
+    ).fetchall()
+    return [(row["paper_id"], row["record_path"]) for row in rows]
+
+
+def list_all_file_rows(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT file_hash, paper_id, canonical_path, text_path
+        FROM files
+        ORDER BY paper_id, file_hash
         """
     ).fetchall()
     return [dict(row) for row in rows]
@@ -604,3 +654,56 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
     )
+
+
+def search_papers(conn: sqlite3.Connection, query: str, *, sort: str = "year") -> list[dict]:
+    """Return rows where title OR authors_json contains query (case-insensitive).
+
+    Literal % and _ in the query are treated as literals, not LIKE wildcards.
+    """
+    if sort == "handle":
+        order_by = "handle_id IS NULL ASC, handle_id ASC, paper_id ASC"
+    elif sort == "year":
+        order_by = "year IS NULL ASC, year DESC, paper_id ASC"
+    else:
+        raise ValueError(f"unsupported paper sort: {sort}")
+
+    # Escape LIKE metacharacters so user-supplied chars are literals.
+    query_escaped = (
+        query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    pattern = f"%{query_escaped}%"
+
+    rows = conn.execute(
+        f"""
+        SELECT handle_id, paper_id, title, authors_json, year, review_status
+        FROM papers
+        WHERE title LIKE ? ESCAPE '\\' OR authors_json LIKE ? ESCAPE '\\'
+        ORDER BY {order_by}
+        """,
+        (pattern, pattern),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_resummary_candidates(
+    conn: sqlite3.Connection, *, limit: int | None = None
+) -> list[dict]:
+    """Return rows where summary_status IN ('failed', 'skipped').
+    
+    Each dict includes: paper_id, record_path, handle_id.
+    Respects limit if given.
+    """
+    query = """
+        SELECT paper_id, record_path, handle_id
+        FROM papers
+        WHERE summary_status IN ('failed', 'skipped')
+    """
+    params = []
+    
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    
+    rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]

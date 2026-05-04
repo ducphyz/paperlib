@@ -12,17 +12,30 @@ from paperlib.config import AppConfig, load_config
 from paperlib.logging_config import setup_logging
 from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
+from paperlib.pipeline.summarise import summarise_record, locked_metadata, restore_locked_metadata
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.review import ReviewCancelled, review_record_interactive
 from paperlib.store import db
+from paperlib.store.fs import move_to_deleted
 from paperlib.store.json_store import (
     read_record,
     read_record_dict,
     write_record_atomic,
 )
+from paperlib.store.validate_library import validate_library
 
 
 CONFIG_HELP = "Path to the PaperLib config TOML file."
+_LIST_SEPARATOR = "  "
+_LIST_COLUMN_WIDTHS = {
+    "handle_id": 20,
+    "paper_id": 18,
+    "year": 9,
+    "first_author": 20,
+    "title": 57,
+    "review_status": 12,
+}
+_LIST_COLUMNS = ("paper_id", "year", "first_author", "title", "review_status")
 
 
 @click.group(name=__title__, help=__description__)
@@ -82,6 +95,299 @@ def validate_config(config_path: str) -> None:
         click.echo(f"{config.ai.api_key_env}: present")
     else:
         click.echo(f"{config.ai.api_key_env}: not required")
+
+
+@main.command("validate-library", help="Validate indexed library files.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
+def validate_library_command(config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    findings = validate_library(config)
+    if not findings:
+        click.echo("ok — no issues found")
+        return
+
+    for finding in findings:
+        click.echo(
+            f"[{finding.severity.upper()}] "
+            f"{finding.category}: {finding.detail}"
+        )
+
+    if any(finding.severity == "error" for finding in findings):
+        raise click.exceptions.Exit(1)
+
+
+@main.command("re-summarise", help="Re-generate AI summaries for records that failed or were skipped.")
+@click.argument("id_or_alias", nargs=1, required=False)
+@click.option("--limit", type=int, help="Process at most this many eligible records.")
+@click.option("--no-ai", is_flag=True, help="Skip AI summarization for this run.")
+@click.option("--debug", is_flag=True, help="Write DEBUG-level log entries.")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
+def resummarise_command(id_or_alias: str | None, limit: int | None, no_ai: bool, debug: bool, config_path: str) -> None:
+    from paperlib.pipeline.clean import clean_text
+    from paperlib.store.db import list_resummary_candidates
+    
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _require_library_root(config)
+    logger = _setup_command_logging(config, debug=debug)
+    logger.info("config loaded: %s", config_path)
+    logger.info("resummarise started: id_or_alias=%s limit=%s no_ai=%s", id_or_alias, limit, no_ai)
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    # Initialize counters
+    eligible_count = 0
+    processed_count = 0
+    generated_count = 0
+    failed_count = 0
+    skipped_locked_count = 0
+    skipped_no_text_count = 0
+
+    conn = db.connect(db_path)
+    try:
+        if id_or_alias:
+            # Process specific record - ignore summary_status and re-summarise regardless
+            try:
+                paper_id = db.resolve_id(conn, id_or_alias)
+            except db.IdNotFound as exc:
+                raise click.ClickException(str(exc)) from exc
+            record_path_value = db.get_record_path(conn, paper_id)
+            if record_path_value is None:
+                raise click.ClickException(f"Record path not found for: {paper_id}")
+            
+            # Resolve relative path against library root
+            record_path = Path(record_path_value)
+            if not record_path.is_absolute():
+                record_path = config.library.root / record_path
+            
+            # Process this specific record directly
+            candidate = {'paper_id': paper_id, 'record_path': record_path_value, 'handle_id': id_or_alias}
+            candidates = [candidate]
+            # For specific ID, we don't count as eligible since we process regardless of status
+            
+            paper_id = candidate['paper_id']
+            record_path_str = candidate['record_path']
+            
+            # Resolve relative path against library root
+            record_path = Path(record_path_str)
+            if not record_path.is_absolute():
+                record_path = config.library.root / record_path
+
+            try:
+                try:
+                    record = read_record(record_path)
+                except Exception as exc:
+                    raise click.ClickException(
+                        f"Could not read record {record_path}: {exc}"
+                    ) from exc
+                
+                # Skip if record.summary["locked"] is True
+                if record.summary.get("locked", False):
+                    skipped_locked_count += 1
+                    logger.info("skipping locked record: paper_id=%s", paper_id)
+                else:
+                    # Select source file: prefer the FileRecord whose file_hash matches record.summary["source_file_hash"]
+                    source_file_hash = record.summary.get("source_file_hash")
+                    source_file_record = None
+                    
+                    if source_file_hash:
+                        for file_record in record.files:
+                            if file_record.file_hash == source_file_hash:
+                                source_file_record = file_record
+                                break
+                    
+                    # Fall back to record.files[0] if no match found
+                    if not source_file_record and record.files:
+                        source_file_record = record.files[0]
+
+                    # Check if source file record exists and text file is accessible
+                    if not source_file_record or not source_file_record.text_path:
+                        skipped_no_text_count += 1
+                        logger.warning("skipping record with no source file: paper_id=%s", paper_id)
+                    else:
+                        # Resolve text path
+                        text_path = Path(source_file_record.text_path)
+                        if not text_path.is_absolute():
+                            text_path = config.library.root / text_path
+
+                        if not text_path.exists():
+                            skipped_no_text_count += 1
+                            logger.warning("skipping record, text file missing: paper_id=%s text_path=%s", paper_id, text_path)
+                        else:
+                            # Read text file content and clean it
+                            text_content = text_path.read_text(encoding="utf-8")
+                            cleaned_text = clean_text(text_content)
+
+                            # Prepare for summarization
+                            locked_fields = locked_metadata(record)
+                            
+                            # Perform summarisation
+                            updated_record, generated, error_msg = summarise_record(
+                                record,
+                                cleaned_text=cleaned_text,
+                                source_file_hash=source_file_record.file_hash,
+                                ai_config=config.ai,
+                                no_ai=no_ai
+                            )
+                            
+                            # Restore locked metadata
+                            restore_locked_metadata(updated_record, locked_fields)
+
+                            # Write updated record back to disk
+                            write_record_atomic(record_path, updated_record)
+
+                            # Update database index
+                            db.update_record_index(conn, updated_record, record_path_str)
+
+                            processed_count += 1
+                            if generated:
+                                generated_count += 1
+                            if error_msg:
+                                failed_count += 1
+                                logger.warning("summarization failed for paper_id=%s: %s", paper_id, error_msg)
+
+                            logger.info("processed record: paper_id=%s generated=%s", paper_id, generated)
+
+            except click.ClickException:
+                raise
+            except Exception as e:
+                failed_count += 1
+                logger.error("error processing record: paper_id=%s error=%s", paper_id, str(e))
+        else:
+            # Process eligible records (status failed or skipped)
+            candidates = list_resummary_candidates(conn, limit=limit)
+            eligible_count = len(candidates)
+
+            for candidate in candidates:
+                paper_id = candidate['paper_id']
+                record_path_str = candidate['record_path']
+                
+                # Resolve relative path against library root
+                record_path = Path(record_path_str)
+                if not record_path.is_absolute():
+                    record_path = config.library.root / record_path
+
+                try:
+                    record = read_record(record_path)
+                    
+                    # Skip if record.summary["locked"] is True
+                    if record.summary.get("locked", False):
+                        skipped_locked_count += 1
+                        logger.info("skipping locked record: paper_id=%s", paper_id)
+                        continue
+
+                    # Select source file: prefer the FileRecord whose file_hash matches record.summary["source_file_hash"]
+                    source_file_hash = record.summary.get("source_file_hash")
+                    source_file_record = None
+                    
+                    if source_file_hash:
+                        for file_record in record.files:
+                            if file_record.file_hash == source_file_hash:
+                                source_file_record = file_record
+                                break
+                    
+                    # Fall back to record.files[0] if no match found
+                    if not source_file_record and record.files:
+                        source_file_record = record.files[0]
+
+                    # Check if source file record exists and text file is accessible
+                    if not source_file_record or not source_file_record.text_path:
+                        skipped_no_text_count += 1
+                        logger.warning("skipping record with no source file: paper_id=%s", paper_id)
+                        continue
+
+                    # Resolve text path
+                    text_path = Path(source_file_record.text_path)
+                    if not text_path.is_absolute():
+                        text_path = config.library.root / text_path
+
+                    if not text_path.exists():
+                        skipped_no_text_count += 1
+                        logger.warning("skipping record, text file missing: paper_id=%s text_path=%s", paper_id, text_path)
+                        continue
+
+                    # Read text file content and clean it
+                    text_content = text_path.read_text(encoding="utf-8")
+                    cleaned_text = clean_text(text_content)
+
+                    # Prepare for summarization
+                    locked_fields = locked_metadata(record)
+                    
+                    # Perform summarisation
+                    updated_record, generated, error_msg = summarise_record(
+                        record,
+                        cleaned_text=cleaned_text,
+                        source_file_hash=source_file_record.file_hash,
+                        ai_config=config.ai,
+                        no_ai=no_ai
+                    )
+                    
+                    # Restore locked metadata
+                    restore_locked_metadata(updated_record, locked_fields)
+
+                    # Write updated record back to disk
+                    write_record_atomic(record_path, updated_record)
+
+                    # Update database index
+                    db.update_record_index(conn, updated_record, record_path_str)
+
+                    processed_count += 1
+                    if generated:
+                        generated_count += 1
+                    if error_msg:
+                        failed_count += 1
+                        logger.warning("summarization failed for paper_id=%s: %s", paper_id, error_msg)
+
+                    logger.info("processed record: paper_id=%s generated=%s", paper_id, generated)
+
+                except Exception as e:
+                    failed_count += 1
+                    logger.error("error processing record: paper_id=%s error=%s", paper_id, str(e))
+
+    finally:
+        conn.close()
+
+    # Print summary report
+    if id_or_alias:
+        # When processing specific ID, eligible count should be 0 since we're bypassing eligibility check
+        click.echo(f"{'eligible:':<21} 0")
+    else:
+        click.echo(f"{'eligible:':<21} {eligible_count}")
+    click.echo(f"{'processed:':<21} {processed_count}")
+    click.echo(f"{'generated:':<21} {generated_count}")
+    click.echo(f"{'failed:':<21} {failed_count}")
+    click.echo(f"{'skipped locked:':<21} {skipped_locked_count}")
+    click.echo(f"{'skipped no text:':<21} {skipped_no_text_count}")
+
+    logger.info(
+        "resummarise finished: eligible=%s processed=%s generated=%s failed=%s "
+        "skipped_locked=%s skipped_no_text=%s",
+        eligible_count if not id_or_alias else 0, processed_count, generated_count,
+        failed_count, skipped_locked_count, skipped_no_text_count
+    )
 
 
 @main.command("ingest", help="Ingest PDFs from the configured inbox.")
@@ -304,6 +610,74 @@ def show(id_or_alias: str, config_path: str) -> None:
     )
 
 
+@main.command("delete", help="Delete a paper record and move PDFs aside.")
+@click.argument("id_or_alias")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
+def delete(id_or_alias: str, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    try:
+        try:
+            paper_id = db.resolve_id(conn, id_or_alias)
+        except db.IdNotFound as exc:
+            raise click.ClickException(str(exc)) from exc
+        record_path_value = db.get_record_path(conn, paper_id)
+    finally:
+        conn.close()
+
+    if record_path_value is None:
+        raise click.ClickException(f"Record path not found for: {paper_id}")
+
+    record_path = _resolve_library_path(config.library.root, record_path_value)
+
+    try:
+        record = read_record(record_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    conn = db.connect(db_path)
+    try:
+        db.delete_paper(conn, paper_id)
+    finally:
+        conn.close()
+
+    for file_record in record.files:
+        pdf_path = _resolve_library_path(
+            config.library.root,
+            file_record.canonical_path,
+        )
+        if pdf_path.exists():
+            move_to_deleted(pdf_path, config.paths.deleted)
+        else:
+            click.echo(f"Warning: canonical PDF missing: {pdf_path}")
+
+    for file_record in record.files:
+        text_path = _resolve_library_path(
+            config.library.root,
+            file_record.text_path,
+        )
+        text_path.unlink(missing_ok=True)
+
+    record_path.unlink()
+    click.echo(f"deleted: {record.handle_id or record.paper_id}")
+
+
 @main.command("mark-reviewed", help="Mark a record reviewed and lock it.")
 @click.argument("id_or_alias")
 @click.option(
@@ -484,21 +858,194 @@ def list_command(
     finally:
         conn.close()
 
-    columns = ["paper_id", "year", "first_author", "title", "review_status"]
-    if not no_handle:
-        columns.insert(0, "handle_id")
-    click.echo(" | ".join(columns))
+    include_handle = not no_handle
+    click.echo(_format_list_header(include_handle=include_handle))
     for row in rows:
-        values = [
-            row["paper_id"],
-            _format_year(row.get("year")),
-            _first_author(row.get("authors_json")),
-            _truncate_title(row.get("title")),
-            row.get("review_status") or "",
-        ]
-        if not no_handle:
-            values.insert(0, row.get("handle_id") or "<none>")
-        click.echo(" | ".join(values))
+        click.echo(_format_list_row(row, include_handle=include_handle))
+
+
+@main.command("export", help="Export records to an external format.")
+@click.option("--bibtex", "fmt", flag_value="bibtex", required=True, help="Export as BibTeX.")
+@click.option("--output", "output_path", default=None, help="Path to write output file; default stdout.")
+@click.argument("id_or_alias", nargs=-1, required=False)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
+def export_command(fmt: str, output_path: str | None, id_or_alias: tuple[str, ...], config_path: str) -> None:
+    from paperlib.export import records_to_bibtex
+    from paperlib.store.fs import atomic_write_text
+
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _require_library_root(config)
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    conn = db.connect(db_path)
+    records = []
+    try:
+        if id_or_alias:
+            for alias in id_or_alias:
+                try:
+                    paper_id = db.resolve_id(conn, alias)
+                except db.IdNotFound as exc:
+                    raise click.ClickException(str(exc)) from exc
+                record_path_str = db.get_record_path(conn, paper_id)
+                if record_path_str is None:
+                    raise click.ClickException(f"Record path not found for: {paper_id}")
+                record_path = Path(record_path_str)
+                if not record_path.is_absolute():
+                    record_path = config.library.root / record_path
+                try:
+                    records.append(read_record(record_path))
+                except Exception as exc:
+                    raise click.ClickException(
+                        f"Could not read record {record_path}: {exc}"
+                    ) from exc
+        else:
+            for paper_id, record_path_str in db.list_all_record_paths(conn):
+                record_path = Path(record_path_str)
+                if not record_path.is_absolute():
+                    record_path = config.library.root / record_path
+                try:
+                    records.append(read_record(record_path))
+                except Exception as exc:
+                    raise click.ClickException(
+                        f"Could not read record {record_path}: {exc}"
+                    ) from exc
+    finally:
+        conn.close()
+
+    bibtex_output = records_to_bibtex(records)
+
+    if output_path:
+        atomic_write_text(Path(output_path), bibtex_output)
+        click.echo(f"exported {len(records)} records")
+    else:
+        click.echo(bibtex_output)
+
+
+@main.command("search", help="Search papers by title, authors, or summary text.")
+@click.argument("query")
+@click.option(
+    "--field",
+    type=click.Choice(["title", "authors", "summary", "all"]),
+    default="all",
+    show_default=True,
+    help="Field to search: title, authors, summary, or all.",
+)
+@click.option(
+    "--sort",
+    "sort_by",
+    type=click.Choice(["year", "handle"]),
+    default="year",
+    show_default=True,
+    help="Sort results by year or handle_id.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    default="config.toml",
+    show_default=True,
+    help=CONFIG_HELP,
+)
+def search_command(query: str, field: str, sort_by: str, config_path: str) -> None:
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _require_library_root(config)
+
+    db_path = config.paths.db
+    if not db_path.exists():
+        raise click.ClickException(
+            "No database found. Run paperlib ingest or paperlib rebuild-index."
+        )
+
+    rows: list[dict] = []
+    query_lower = query.lower()
+
+    # --- SQLite search for title / authors / all ---
+    if field in ("title", "authors", "all"):
+        conn = db.connect(db_path)
+        try:
+            db_rows = db.search_papers(conn, query, sort=sort_by)
+        finally:
+            conn.close()
+
+        if field == "title":
+            # Keep only rows where the title itself matches
+            db_rows = [
+                r for r in db_rows
+                if r.get("title") is not None and query_lower in r["title"].lower()
+            ]
+        elif field == "authors":
+            # Keep only rows where authors_json itself matches
+            db_rows = [
+                r for r in db_rows
+                if r.get("authors_json") is not None
+                and query_lower in r["authors_json"].lower()
+            ]
+
+        rows.extend(db_rows)
+
+    # --- Summary scan for summary / all ---
+    if field in ("summary", "all"):
+        existing_ids = {r["paper_id"] for r in rows}
+        for json_path in sorted(config.paths.records.glob("*.json")):
+            try:
+                record = read_record(json_path)
+            except Exception:
+                continue
+
+            summary_texts = [
+                record.summary.get("one_sentence") or "",
+                record.summary.get("short") or "",
+                record.summary.get("technical") or "",
+            ]
+            if not any(query_lower in t.lower() for t in summary_texts if t):
+                continue
+
+            if record.paper_id in existing_ids:
+                continue
+            existing_ids.add(record.paper_id)
+
+            title_field = record.metadata.get("title")
+            authors_field = record.metadata.get("authors")
+            year_field = record.metadata.get("year")
+
+            authors_json_str: str | None = None
+            if authors_field is not None and authors_field.value is not None:
+                authors_json_str = json.dumps(authors_field.value)
+
+            rows.append({
+                "handle_id": record.handle_id,
+                "paper_id": record.paper_id,
+                "title": title_field.value if title_field is not None else None,
+                "authors_json": authors_json_str,
+                "year": year_field.value if year_field is not None else None,
+                "review_status": record.status.get("review"),
+            })
+
+    if not rows:
+        click.echo("no results")
+        return
+
+    click.echo(_format_list_header(include_handle=True))
+    for row in rows:
+        click.echo(_format_list_row(row, include_handle=True))
 
 
 def _print_ingest_report(report) -> None:
@@ -526,6 +1073,41 @@ def _setup_command_logging(config: AppConfig, *, debug: bool) -> logging.Logger:
 
 def _format_year(value) -> str:
     return "<unknown>" if value is None else str(value)
+
+
+def _resolve_library_path(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
+def _format_list_header(*, include_handle: bool) -> str:
+    columns = list(_LIST_COLUMNS)
+    if include_handle:
+        columns.insert(0, "handle_id")
+    return _LIST_SEPARATOR.join(
+        column.ljust(_LIST_COLUMN_WIDTHS[column]) for column in columns
+    )
+
+
+def _format_list_row(row: dict, *, include_handle: bool) -> str:
+    values = [
+        ("paper_id", str(row["paper_id"])),
+        ("year", _format_year(row.get("year"))),
+        (
+            "first_author",
+            _truncate_text(_first_author(row.get("authors_json")), 20),
+        ),
+        ("title", _truncate_title(row.get("title"))),
+        ("review_status", row.get("review_status") or ""),
+    ]
+    if include_handle:
+        values.insert(0, ("handle_id", row.get("handle_id") or "<none>"))
+    return _LIST_SEPARATOR.join(
+        str(value).ljust(_LIST_COLUMN_WIDTHS[column])
+        for column, value in values
+    )
 
 
 def _format_show_record(record: dict) -> dict:
@@ -557,7 +1139,11 @@ def _first_author(authors_json) -> str:
 def _truncate_title(value) -> str:
     if not value:
         return "<no title>"
-    return value if len(value) <= 60 else f"{value[:57]}..."
+    return value if len(value) <= 57 else f"{value[:54]}..."
+
+
+def _truncate_text(value: str, width: int) -> str:
+    return value if len(value) <= width else value[:width]
 
 
 def _utc_now() -> str:
@@ -616,6 +1202,7 @@ def _ensure_runtime_paths(config: AppConfig) -> list[tuple[str, Path, str]]:
         ("db", config.paths.db.parent),
         ("logs", config.paths.logs),
         ("failed", config.paths.failed),
+        ("deleted", config.paths.deleted),
         ("duplicates", config.paths.duplicates),
     ]
 

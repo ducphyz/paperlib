@@ -1,11 +1,13 @@
 from pathlib import Path
 import sqlite3
 
+from conftest import _write_minimal_pdf
 from paperlib.config import (
     AIConfig,
     AppConfig,
     ExtractionConfig,
     LibraryConfig,
+    LookupConfig,
     PathsConfig,
     PipelineConfig,
 )
@@ -31,6 +33,7 @@ def _config(root: Path) -> AppConfig:
             db=root / "db" / "library.db",
             logs=root / "logs",
             failed=root / "failed",
+            deleted=root / "deleted",
             duplicates=root / "duplicates",
         ),
         pipeline=PipelineConfig(
@@ -139,51 +142,6 @@ def _create_runtime_dirs(config: AppConfig) -> None:
         config.paths.duplicates,
     ):
         path.mkdir(parents=True, exist_ok=True)
-
-
-def _write_minimal_pdf(path: Path) -> None:
-    text = (
-        "arXiv:2401.12345v2 Published 12 March 2024 "
-        "DOI 10.1103/PhysRevLett.123.456 paperlib test text"
-    )
-    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Resources << /Font << /F1 4 0 R >> >> "
-            b"/Contents 5 0 R >>"
-        ),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        (
-            f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
-            + stream
-            + b"\nendstream"
-        ),
-    ]
-
-    content = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for index, obj in enumerate(objects, start=1):
-        offsets.append(len(content))
-        content.extend(f"{index} 0 obj\n".encode("ascii"))
-        content.extend(obj)
-        content.extend(b"\nendobj\n")
-
-    xref_offset = len(content)
-    content.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    content.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        content.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    content.extend(
-        (
-            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-            f"startxref\n{xref_offset}\n%%EOF\n"
-        ).encode("ascii")
-    )
-
-    path.write_bytes(content)
 
 
 def _table_count(db_path: Path, table: str) -> int:
@@ -839,3 +797,100 @@ def test_json_records_remain_source_of_truth_after_rebuild_index(
     assert _table_count(config.paths.db, "processing_runs") == 0
     assert moved_pdf.exists()
     assert text_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# lookup integration test
+# ---------------------------------------------------------------------------
+
+def test_lookup_populates_author_based_handle_and_canonical_path(
+    tmp_path: Path, monkeypatch
+):
+    """When lookup is enabled and Crossref returns an author, the resulting
+    handle_id and canonical PDF path are author-based rather than hash-based."""
+    import json
+    import paperlib.pipeline.lookup as lookup_mod
+    from paperlib.store.json_store import read_record
+
+    # Crossref response supplies "Landau" as the author
+    crossref_response = json.dumps({
+        "message": {
+            "title": ["Theory of Superfluidity"],
+            "author": [{"given": "Lev", "family": "Landau"}],
+            "published": {"date-parts": [[1941]]},
+            "container-title": ["Physical Review"],
+        }
+    }).encode()
+
+    monkeypatch.setattr(
+        lookup_mod,
+        "_http_get",
+        lambda url, *, headers, timeout: crossref_response,
+    )
+
+    # Build an AppConfig with lookup enabled
+    root = tmp_path / "library"
+    root.mkdir()
+    config = AppConfig(
+        library=LibraryConfig(root=root),
+        paths=PathsConfig(
+            inbox=root / "inbox",
+            papers=root / "papers",
+            records=root / "records",
+            text=root / "text",
+            db=root / "db" / "library.db",
+            logs=root / "logs",
+            failed=root / "failed",
+            deleted=root / "deleted",
+            duplicates=root / "duplicates",
+        ),
+        pipeline=PipelineConfig(
+            move_after_ingest=True,
+            skip_existing=True,
+            dry_run_default=False,
+        ),
+        extraction=ExtractionConfig(
+            engine="pdfplumber",
+            min_char_count=1,
+            min_word_count=1,
+        ),
+        ai=AIConfig(
+            enabled=False,
+            provider="anthropic",
+            model="test",
+            max_tokens=100,
+            temperature=0.0,
+            anthropic_api_key=None,
+        ),
+        lookup=LookupConfig(enabled=True, mailto=None, timeout_sec=5.0),
+    )
+
+    # Write a minimal PDF whose text contains "DOI 10.1234/phase7"
+    pdf_path = config.paths.inbox / "lookup_test.pdf"
+    _write_minimal_pdf(pdf_path)
+
+    report = ingest_library(config, no_ai=True, dry_run=False)
+
+    assert report.records_written == 1, f"expected 1 record, got: {report.warnings}"
+
+    # Retrieve the ingested row from SQLite
+    conn = db.connect(config.paths.db)
+    try:
+        rows = db.list_papers(conn, sort="year")
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    handle_id = rows[0]["handle_id"]
+    assert handle_id is not None, "handle_id should be set"
+    assert "landau" in handle_id.lower(), (
+        f"expected author-based handle containing 'landau', got: {handle_id}"
+    )
+
+    # Verify the canonical PDF path also uses the author name
+    record_path = config.paths.records / f"{rows[0]['paper_id']}.json"
+    record = read_record(record_path)
+    canonical_paths = [f.canonical_path for f in record.files]
+    assert any("landau" in cp.lower() for cp in canonical_paths), (
+        f"expected canonical path containing 'landau', got: {canonical_paths}"
+    )

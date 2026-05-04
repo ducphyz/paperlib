@@ -8,6 +8,7 @@ from paperlib.store.fs import (
     canonical_pdf_relative_path,
     filename_author_component,
     move_file,
+    move_to_deleted,
     move_to_duplicates,
     move_to_failed,
     sanitize_component,
@@ -227,6 +228,35 @@ def test_move_to_failed_increments_collision_suffix(tmp_path: Path):
     destination = move_to_failed(source, failed_dir)
 
     assert destination == failed_dir / "bad_2.pdf"
+
+
+def test_move_to_deleted_preserves_name_when_available(tmp_path: Path):
+    source = tmp_path / "discard.pdf"
+    deleted_dir = tmp_path / "deleted"
+    source.write_bytes(b"discard")
+
+    destination = move_to_deleted(source, deleted_dir)
+
+    assert destination == deleted_dir / "discard.pdf"
+    assert destination.read_bytes() == b"discard"
+    assert not source.exists()
+
+
+def test_move_to_deleted_adds_deterministic_suffix_on_collision(
+    tmp_path: Path,
+):
+    source = tmp_path / "discard.pdf"
+    deleted_dir = tmp_path / "deleted"
+    deleted_dir.mkdir()
+    source_data = b"incoming"
+    source.write_bytes(source_data)
+    (deleted_dir / "discard.pdf").write_bytes(b"existing")
+
+    destination = move_to_deleted(source, deleted_dir)
+
+    assert destination == deleted_dir / "discard_1.pdf"
+    assert destination.read_bytes() == source_data
+    assert (deleted_dir / "discard.pdf").read_bytes() == b"existing"
 
 
 def test_move_to_duplicates_preserves_name_and_content(tmp_path: Path):

@@ -38,7 +38,7 @@ def test_readme_documents_v1_1_workflows():
         "openrouter:",
         "openai-compat:",
         "Known Limitations",
-        "0.1.1",
+        "1.2.0",
     ):
         assert required in text
 
@@ -47,6 +47,7 @@ def test_config_example_parses_and_validates():
     config_path = REPO_ROOT / "config.example.toml"
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     assert data["library"]["root"] == "."
+    assert data["lookup"]["timeout_sec"] == 5.0
     assert "openai:gpt-4o" in config_path.read_text(encoding="utf-8")
     assert "openrouter:" in config_path.read_text(encoding="utf-8")
     assert "openai-compat:" in config_path.read_text(encoding="utf-8")
@@ -59,6 +60,7 @@ def test_config_example_parses_and_validates():
         REPO_ROOT / "db",
         REPO_ROOT / "logs",
         REPO_ROOT / "failed",
+        REPO_ROOT / "deleted",
         REPO_ROOT / "duplicates",
     ]
     preexisting = {path for path in runtime_dirs if path.exists()}

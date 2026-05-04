@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import builtins
 import os
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
@@ -287,30 +284,8 @@ def test_call_ai_openai_compat_requires_base_url(monkeypatch):
         )
 
 
-def test_openai_compatible_missing_dependency_raises_install_hint(monkeypatch):
-    original_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "openai":
-            raise ImportError("missing")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-    with pytest.raises(AIError, match=r"install paperlib\[openai\]"):
-        call_openai_compatible(
-            "prompt",
-            model="gpt-4o",
-            base_url=None,
-            api_key="test-key",
-            max_tokens=100,
-            temperature=0.2,
-        )
-
-
 def test_openai_compatible_response_returns_text(monkeypatch):
     captured = {}
-    fake_openai = types.ModuleType("openai")
 
     class FakeCompletions:
         def create(self, **kwargs):
@@ -330,8 +305,7 @@ def test_openai_compatible_response_returns_text(monkeypatch):
                 completions=FakeCompletions(),
             )
 
-    fake_openai.OpenAI = FakeOpenAI
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(ai_client, "OpenAI", FakeOpenAI)
 
     result = call_openai_compatible(
         "prompt",

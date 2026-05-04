@@ -304,3 +304,23 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
     )
+
+
+def locked_metadata(record: PaperRecord) -> dict:
+    """Return a deep copy of all locked metadata fields from the record."""
+    from copy import deepcopy
+    return {
+        name: deepcopy(field_value)
+        for name, field_value in record.metadata.items()
+        if field_value.locked
+    }
+
+
+def restore_locked_metadata(record: PaperRecord, locked_metadata: dict) -> int:
+    """Restore locked metadata fields to the record.
+    
+    Returns the number of fields restored.
+    """
+    for name, field_value in locked_metadata.items():
+        record.metadata[name] = field_value
+    return len(locked_metadata)

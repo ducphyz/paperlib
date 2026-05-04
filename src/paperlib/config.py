@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ class PathsConfig:
     db: Path
     logs: Path
     failed: Path
+    deleted: Path
     duplicates: Path
 
 
@@ -71,12 +72,20 @@ class AIConfig:
 
 
 @dataclass
+class LookupConfig:
+    enabled: bool = False
+    mailto: str | None = None
+    timeout_sec: float = 5.0
+
+
+@dataclass
 class AppConfig:
     library: LibraryConfig
     paths: PathsConfig
     pipeline: PipelineConfig
     extraction: ExtractionConfig
     ai: AIConfig
+    lookup: LookupConfig = field(default_factory=LookupConfig)
 
 
 class ConfigError(ValueError):
@@ -107,6 +116,12 @@ def load_config(config_path: Path | str = "config.toml") -> AppConfig:
     extraction_data = _section(data, "extraction")
     ai_data = _section(data, "ai")
     ai_config = _load_ai_config(ai_data)
+    lookup_data = _section(data, "lookup")
+    lookup_config = LookupConfig(
+        enabled=bool(lookup_data.get("enabled", False)),
+        mailto=_optional_str(lookup_data.get("mailto")),
+        timeout_sec=float(lookup_data.get("timeout_sec", 5.0)),
+    )
 
     return AppConfig(
         library=LibraryConfig(root=root),
@@ -118,6 +133,9 @@ def load_config(config_path: Path | str = "config.toml") -> AppConfig:
             db=_resolve_path(root, paths_data.get("db", "db/library.db")),
             logs=_resolve_path(root, paths_data.get("logs", "logs")),
             failed=_resolve_path(root, paths_data.get("failed", "failed")),
+            deleted=_resolve_path(
+                root, paths_data.get("deleted", "deleted")
+            ),
             duplicates=_resolve_path(
                 root, paths_data.get("duplicates", "duplicates")
             ),
@@ -137,6 +155,7 @@ def load_config(config_path: Path | str = "config.toml") -> AppConfig:
             min_word_count=int(extraction_data.get("min_word_count", 100)),
         ),
         ai=ai_config,
+        lookup=lookup_config,
     )
 
 

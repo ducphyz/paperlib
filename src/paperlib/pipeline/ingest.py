@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +18,8 @@ from paperlib.pipeline.metadata import (
     build_non_ai_metadata_fields,
     extract_non_ai_metadata,
 )
-from paperlib.pipeline.summarise import summarise_record
+from paperlib.pipeline.lookup import lookup_metadata
+from paperlib.pipeline.summarise import summarise_record, locked_metadata, restore_locked_metadata
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
 from paperlib.store.fs import (
@@ -244,7 +244,7 @@ def _ingest_pdf(
             metadata_fields=metadata_fields,
             now=now,
         )
-        record.handle_id = generate_handle_id(record, db.list_handle_ids(conn))
+        # handle_id assigned after lookup so enriched author/year are available
     else:
         record = _load_existing_record(config, conn, paper_id)
         if record.review.get("locked", False):
@@ -276,6 +276,30 @@ def _ingest_pdf(
         record.timestamps.setdefault("created_at", now)
         record.timestamps["updated_at"] = now
 
+    if config.lookup.enabled:
+        logger.info(
+            "lookup starting: doi=%s arxiv_id=%s title_known=%s authors_known=%s",
+            record.identity.doi,
+            record.identity.arxiv_id,
+            record.metadata["title"].value is not None,
+            record.metadata["authors"].value is not None,
+        )
+        record, lookup_error = lookup_metadata(record, config.lookup, now)
+        if lookup_error:
+            logger.warning("lookup failed: %s", lookup_error)
+        else:
+            logger.info(
+                "lookup ok: title=%s authors=%s",
+                record.metadata["title"].value,
+                record.metadata["authors"].value,
+            )
+    else:
+        logger.debug("lookup disabled")
+
+    # Assign handle_id for new records (after lookup may have filled author/year)
+    if record.handle_id is None:
+        record.handle_id = generate_handle_id(record, db.list_handle_ids(conn))
+
     file_record = _build_file_record(
         config, pdf, extraction, record.metadata, now
     )
@@ -299,7 +323,7 @@ def _ingest_pdf(
     if no_ai or not config.ai.enabled:
         _mark_summary_skipped(record)
     elif not record.summary.get("locked", False):
-        locked_metadata = _locked_metadata(record)
+        locked_fields_snapshot = locked_metadata(record)
         record, generated, error_message = summarise_record(
             record,
             cleaned_text=cleaned_text,
@@ -316,7 +340,7 @@ def _ingest_pdf(
             report.summaries_failed += 1
         if error_message is not None:
             report.warnings.append(error_message)
-        restored_count = _restore_locked_metadata(record, locked_metadata)
+        restored_count = restore_locked_metadata(record, locked_fields_snapshot)
         if restored_count:
             logger.warning(
                 "%s: %s locked fields preserved after AI",
@@ -457,20 +481,6 @@ def _merge_unlocked_metadata(
     record.status["metadata"] = _metadata_status(record)
     record.timestamps["updated_at"] = now
     return locked_preserved
-
-
-def _locked_metadata(record: PaperRecord) -> dict:
-    return {
-        name: deepcopy(field_value)
-        for name, field_value in record.metadata.items()
-        if field_value.locked
-    }
-
-
-def _restore_locked_metadata(record: PaperRecord, locked_metadata: dict) -> int:
-    for name, field_value in locked_metadata.items():
-        record.metadata[name] = field_value
-    return len(locked_metadata)
 
 
 def _metadata_status(record: PaperRecord) -> str:

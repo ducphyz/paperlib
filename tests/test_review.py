@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from conftest import _write_config
 from paperlib.cli import main
 from paperlib.models import status
 from paperlib.models.record import PaperRecord
@@ -59,43 +60,6 @@ def _record() -> PaperRecord:
     record.metadata["year"].value = 2024
     record.metadata["journal"].value = "Old Journal"
     return record
-
-
-def _write_config(path: Path, root: Path) -> None:
-    path.write_text(
-        f"""
-[library]
-root = "{root}"
-
-[paths]
-inbox = "inbox"
-papers = "papers"
-records = "records"
-text = "text"
-db = "db/library.db"
-logs = "logs"
-failed = "failed"
-duplicates = "duplicates"
-
-[pipeline]
-move_after_ingest = true
-skip_existing = true
-dry_run_default = false
-
-[extraction]
-engine = "pdfplumber"
-min_char_count = 500
-min_word_count = 100
-
-[ai]
-enabled = false
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-max_tokens = 1200
-temperature = 0.2
-""",
-        encoding="utf-8",
-    )
 
 
 def _write_record_fixture(root: Path, record: PaperRecord) -> Path:

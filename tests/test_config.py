@@ -9,12 +9,10 @@ from paperlib.config import ConfigError, load_config
 
 
 def _write_config(path: Path, root: Path, ai_block: str) -> None:
-    path.write_text(
-        f"""
-[library]
-root = "{root}"
-
-[paths]
+    _write_config_with_paths(
+        path,
+        root,
+        """
 inbox = "inbox"
 papers = "papers"
 records = "records"
@@ -22,7 +20,26 @@ text = "text"
 db = "db/library.db"
 logs = "logs"
 failed = "failed"
+deleted = "trash"
 duplicates = "duplicates"
+""",
+        ai_block,
+    )
+
+
+def _write_config_with_paths(
+    path: Path,
+    root: Path,
+    paths_block: str,
+    ai_block: str,
+) -> None:
+    path.write_text(
+        f"""
+[library]
+root = "{root}"
+
+[paths]
+{paths_block}
 
 [pipeline]
 move_after_ingest = true
@@ -86,6 +103,56 @@ temperature = 0.2
     assert config.ai.model == "openai:gpt-4o"
     assert config.ai.base_url is None
     assert config.ai.api_key_env == "OPENAI_API_KEY"
+
+
+def test_load_config_populates_deleted_path_from_config(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(
+        config_path,
+        root,
+        """
+enabled = true
+model = "openai:gpt-4o"
+max_tokens = 1200
+temperature = 0.2
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.paths.deleted == root / "trash"
+
+
+def test_load_config_defaults_deleted_path_when_absent(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config_with_paths(
+        config_path,
+        root,
+        """
+inbox = "inbox"
+papers = "papers"
+records = "records"
+text = "text"
+db = "db/library.db"
+logs = "logs"
+failed = "failed"
+duplicates = "duplicates"
+""",
+        """
+enabled = true
+model = "openai:gpt-4o"
+max_tokens = 1200
+temperature = 0.2
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.paths.deleted == root / "deleted"
 
 
 def test_openrouter_gets_default_base_url(tmp_path: Path):
