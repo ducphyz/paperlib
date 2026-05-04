@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+import sqlite3
 from pathlib import Path
 
 import click
@@ -10,6 +10,7 @@ import click
 from paperlib.__about__ import __description__, __title__, __version__
 from paperlib.config import AppConfig, load_config
 from paperlib.logging_config import setup_logging
+from paperlib.models.record import PaperRecord
 from paperlib.pipeline.discover import discover_pdfs
 from paperlib.pipeline.ingest import ingest_library
 from paperlib.pipeline.summarise import summarise_record, locked_metadata, restore_locked_metadata
@@ -22,7 +23,7 @@ from paperlib.store.json_store import (
     read_record_dict,
     write_record_atomic,
 )
-from paperlib.store.validate_library import validate_library
+from paperlib.utils import utc_now
 
 
 CONFIG_HELP = "Path to the PaperLib config TOML file."
@@ -110,6 +111,8 @@ def validate_library_command(config_path: str) -> None:
         config = load_config(config_path)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
+
+    from paperlib.store.validate_library import validate_library
 
     findings = validate_library(config)
     if not findings:
@@ -562,6 +565,27 @@ def status(config_path: str) -> None:
     click.echo(f"{'summary failed:':<21}{counts['summary_failed']}")
 
 
+def _load_record_by_id(
+    conn: sqlite3.Connection,
+    config: AppConfig,
+    id_or_alias: str,
+) -> PaperRecord:
+    try:
+        paper_id = db.resolve_id(conn, id_or_alias)
+    except db.IdNotFound as exc:
+        raise click.ClickException(str(exc)) from exc
+    if paper_id is None:
+        raise click.ClickException(f"Record not found: {id_or_alias}")
+    record_path_value = db.get_record_path(conn, paper_id)
+    if record_path_value is None:
+        raise click.ClickException(f"Record path not found for: {paper_id}")
+    record_path = _resolve_library_path(config.library.root, record_path_value)
+    try:
+        return read_record(record_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("show", help="Show one paper record as JSON.")
 @click.argument("id_or_alias")
 @click.option(
@@ -721,7 +745,7 @@ def mark_reviewed(id_or_alias: str, config_path: str) -> None:
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
-    now = _utc_now()
+    now = utc_now()
     record.status["review"] = "reviewed"
     record.review["locked"] = True
     record.review["reviewed_at"] = now
@@ -897,22 +921,7 @@ def export_command(fmt: str, output_path: str | None, id_or_alias: tuple[str, ..
     try:
         if id_or_alias:
             for alias in id_or_alias:
-                try:
-                    paper_id = db.resolve_id(conn, alias)
-                except db.IdNotFound as exc:
-                    raise click.ClickException(str(exc)) from exc
-                record_path_str = db.get_record_path(conn, paper_id)
-                if record_path_str is None:
-                    raise click.ClickException(f"Record path not found for: {paper_id}")
-                record_path = Path(record_path_str)
-                if not record_path.is_absolute():
-                    record_path = config.library.root / record_path
-                try:
-                    records.append(read_record(record_path))
-                except Exception as exc:
-                    raise click.ClickException(
-                        f"Could not read record {record_path}: {exc}"
-                    ) from exc
+                records.append(_load_record_by_id(conn, config, alias))
         else:
             for paper_id, record_path_str in db.list_all_record_paths(conn):
                 record_path = Path(record_path_str)
@@ -1146,10 +1155,6 @@ def _truncate_text(value: str, width: int) -> str:
     return value if len(value) <= width else value[:width]
 
 
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
 
 
 def _print_dry_run_table(pdfs) -> None:

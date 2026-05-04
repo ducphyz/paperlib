@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paperlib.config import AppConfig
+from paperlib.cli import _resolve_library_path
 from paperlib.store.db import list_all_paper_rows
 from paperlib.store.json_store import read_record
 
@@ -113,10 +114,3 @@ def validate_library(config: AppConfig) -> list[Finding]:
     if conn:
         conn.close()
     return findings
-
-
-def _resolve_library_path(root: Path, value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return root / path

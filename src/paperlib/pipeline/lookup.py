@@ -11,6 +11,7 @@ from paperlib.config import LookupConfig
 from paperlib.models.metadata import MetadataField
 from paperlib.models.record import PaperRecord
 from paperlib.models.status import SOURCE_ARXIV_API, SOURCE_CROSSREF
+from paperlib.utils import field_exists
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
@@ -170,7 +171,7 @@ def _apply_result(
         # Respect field-level lock
         if record.metadata[key].locked:
             continue
-        if _field_exists(record.metadata[key].value):
+        if field_exists(record.metadata[key].value):
             continue
         record.metadata[key] = MetadataField(
             value=value,
@@ -179,13 +180,3 @@ def _apply_result(
             locked=False,
             updated_at=now_iso,
         )
-
-
-def _field_exists(value: object) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, list):
-        return bool(value)
-    return True

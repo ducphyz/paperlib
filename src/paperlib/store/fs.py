@@ -185,25 +185,23 @@ def move_file(src: Path, dst: Path) -> None:
         shutil.move(str(src), str(dst))
 
 
-def move_to_failed(src: Path, failed_dir: Path) -> Path:
-    failed_dir.mkdir(parents=True, exist_ok=True)
-    destination = _unique_destination(failed_dir / src.name)
+def _move_to_dir(src: Path, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(dest_dir / src.name)
     move_file(src, destination)
     return destination
+
+
+def move_to_failed(src: Path, failed_dir: Path) -> Path:
+    return _move_to_dir(src, failed_dir)
 
 
 def move_to_deleted(src: Path, deleted_dir: Path) -> Path:
-    deleted_dir.mkdir(parents=True, exist_ok=True)
-    destination = _unique_destination(deleted_dir / src.name)
-    move_file(src, destination)
-    return destination
+    return _move_to_dir(src, deleted_dir)
 
 
 def move_to_duplicates(src: Path, duplicates_dir: Path) -> Path:
-    duplicates_dir.mkdir(parents=True, exist_ok=True)
-    destination = _unique_destination(duplicates_dir / src.name)
-    move_file(src, destination)
-    return destination
+    return _move_to_dir(src, duplicates_dir)
 
 
 def _unique_destination(destination: Path) -> Path:

@@ -7,6 +7,7 @@ from pathlib import Path
 from paperlib.models import status as status_values
 from paperlib.models.identity import normalize_arxiv_id, normalize_doi
 from paperlib.models.metadata import MetadataField
+from paperlib.utils import utc_now
 
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s]+\b")
@@ -251,7 +252,7 @@ def build_non_ai_metadata_fields(
         "year": MetadataField(),
         "journal": MetadataField(),
     }
-    timestamp = now_iso or _utc_now()
+    timestamp = now_iso or utc_now()
 
     embedded_title = extract_title_from_pdf_metadata(embedded_pdf_metadata)
     embedded_authors = extract_authors_from_pdf_metadata(embedded_pdf_metadata)
@@ -442,9 +443,3 @@ def _clean_filename_author(value: str) -> str | None:
     ):
         return None
     return author
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )

@@ -17,6 +17,7 @@ from paperlib.store.json_store import (
     read_record,
     write_record_atomic,
 )
+from paperlib.utils import utc_now
 
 
 class IdNotFound(LookupError):
@@ -101,7 +102,7 @@ def _upsert_paper_sql(
     status = data.get("status", {})
     timestamps = data.get("timestamps", {})
     authors = _metadata_value(metadata, "authors")
-    now = _utc_now()
+    now = utc_now()
 
     conn.execute(
         """
@@ -168,7 +169,7 @@ def insert_aliases(
 def _insert_aliases_sql(
     conn: sqlite3.Connection, paper_id: str, aliases: list[str]
 ) -> None:
-    created_at = _utc_now()
+    created_at = utc_now()
     conn.executemany(
         """
         INSERT OR IGNORE INTO aliases (
@@ -311,7 +312,7 @@ def _log_processing_run_sql(
     status: str,
     message: str | None,
 ) -> None:
-    now = _utc_now()
+    now = utc_now()
     conn.execute(
         """
         INSERT INTO processing_runs (
@@ -648,12 +649,6 @@ def _index_record(
 
 def _backup_timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
 
 
 def search_papers(conn: sqlite3.Connection, query: str, *, sort: str = "year") -> list[dict]:

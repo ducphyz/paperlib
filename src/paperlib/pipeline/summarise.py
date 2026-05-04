@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 
 from paperlib.ai.client import AIError, call_ai
 from paperlib.ai.prompts import SUMMARY_PROMPT_VERSION, build_summary_prompt
 from paperlib.models import status as status_values
 from paperlib.models.record import PaperRecord
+from paperlib.utils import metadata_status, utc_now
 
 
 REQUIRED_MODEL_KEYS = {
@@ -60,7 +60,7 @@ def summarise_record(
     now_iso: str | None = None,
 ) -> tuple[PaperRecord, bool, str | None]:
     if now_iso is None:
-        now_iso = _utc_now()
+        now_iso = utc_now()
 
     if no_ai or not getattr(ai_config, "enabled", True):
         _mark_summary_skipped(record)
@@ -224,41 +224,10 @@ def apply_ai_output_to_record(
         )
         record.status["summary"] = status_values.SUMMARY_GENERATED
 
-    record.status["metadata"] = _metadata_status(record)
+    record.status["metadata"] = metadata_status(record)
     record.timestamps["updated_at"] = now_iso
     _validate_record_summary(record.summary)
     return record
-
-
-def _metadata_status(record: PaperRecord) -> str:
-    title_exists = _field_exists(record.metadata["title"].value)
-    authors_exist = _field_exists(record.metadata["authors"].value)
-    if title_exists and authors_exist:
-        return status_values.METADATA_OK
-
-    if any(
-        [
-            title_exists,
-            authors_exist,
-            _field_exists(record.metadata["journal"].value),
-            _field_exists(record.metadata["year"].value),
-            _field_exists(record.identity.doi),
-            _field_exists(record.identity.arxiv_id),
-        ]
-    ):
-        return status_values.METADATA_PARTIAL
-
-    return status_values.METADATA_PENDING
-
-
-def _field_exists(value) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, list):
-        return bool(value)
-    return True
 
 
 def _validate_record_summary(summary: dict) -> None:
@@ -300,10 +269,6 @@ def _safe_error_message(exc: Exception, prompt: str) -> str:
     return f"{exc.__class__.__name__}: {message}"
 
 
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
 
 
 def locked_metadata(record: PaperRecord) -> dict:

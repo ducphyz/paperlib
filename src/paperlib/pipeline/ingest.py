@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 from paperlib.config import AppConfig
@@ -20,7 +19,12 @@ from paperlib.pipeline.metadata import (
     extract_non_ai_metadata,
 )
 from paperlib.pipeline.lookup import lookup_metadata
-from paperlib.pipeline.summarise import summarise_record, locked_metadata, restore_locked_metadata
+from paperlib.pipeline.summarise import (
+    _mark_summary_skipped,
+    locked_metadata,
+    restore_locked_metadata,
+    summarise_record,
+)
 from paperlib.pipeline.validate import validate_pdf
 from paperlib.store import db
 from paperlib.store.fs import (
@@ -31,6 +35,7 @@ from paperlib.store.fs import (
     move_to_failed,
 )
 from paperlib.store.json_store import read_record, write_record_atomic
+from paperlib.utils import metadata_status, utc_now
 
 
 logger = logging.getLogger("paperlib.pipeline.ingest")
@@ -130,7 +135,7 @@ def ingest_library(
                     existing_record = _load_existing_record(
                         config, conn, existing_file_paper_id
                     )
-                    if existing_record.review.get("locked", False):
+                    if _is_record_locked(existing_record):
                         report.locked_skipped += 1
                         logger.warning(
                             "%s: locked record skipped during ingest",
@@ -214,7 +219,7 @@ def _ingest_pdf(
         )
     cleaned_text = clean_text(extraction.raw_text)
     metadata_values = extract_non_ai_metadata(cleaned_text, pdf.path.name)
-    now = _utc_now()
+    now = utc_now()
     metadata_fields = build_non_ai_metadata_fields(
         year=metadata_values["year"],
         year_confidence=metadata_values["year_confidence"],
@@ -248,7 +253,7 @@ def _ingest_pdf(
         # handle_id assigned after lookup so enriched author/year are available
     else:
         record = _load_existing_record(config, conn, paper_id)
-        if record.review.get("locked", False):
+        if _is_record_locked(record):
             report.locked_skipped += 1
             logger.warning(
                 "%s: locked record skipped during ingest",
@@ -479,53 +484,14 @@ def _merge_unlocked_metadata(
 
         record.metadata[field_name] = incoming_field
 
-    record.status["metadata"] = _metadata_status(record)
+    record.status["metadata"] = metadata_status(record)
     record.timestamps["updated_at"] = now
     return locked_preserved
-
-
-def _metadata_status(record: PaperRecord) -> str:
-    title_exists = _field_exists(record.metadata["title"].value)
-    authors_exist = _field_exists(record.metadata["authors"].value)
-    if title_exists and authors_exist:
-        return status_values.METADATA_OK
-
-    if any(
-        _field_exists(value)
-        for value in (
-            record.metadata["journal"].value,
-            record.metadata["year"].value,
-            record.identity.doi,
-            record.identity.arxiv_id,
-        )
-    ) or title_exists or authors_exist:
-        return status_values.METADATA_PARTIAL
-
-    return status_values.METADATA_PENDING
-
-
-def _field_exists(value) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, list):
-        return bool(value)
-    return True
 
 
 def _record_label(record: PaperRecord) -> str:
     return record.handle_id or record.paper_id
 
 
-def _mark_summary_skipped(record: PaperRecord) -> None:
-    if record.summary.get("locked", False):
-        return
-    record.summary["status"] = status_values.SUMMARY_SKIPPED
-    record.status["summary"] = status_values.SUMMARY_SKIPPED
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+def _is_record_locked(record: PaperRecord) -> bool:
+    return bool(record.review.get("locked", False))
