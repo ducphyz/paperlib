@@ -24,6 +24,7 @@ text = "text"
 db = "db/library.db"
 logs = "logs"
 failed = "failed"
+deleted = "deleted"
 duplicates = "duplicates"
 
 [pipeline]
@@ -38,10 +39,14 @@ min_word_count = 100
 
 [ai]
 enabled = true
-provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 max_tokens = 1200
 temperature = 0.2
+
+[lookup]
+enabled = false
+mailto = ""
+timeout_sec = 5.0
 ```
 
 ## Keys
@@ -79,6 +84,10 @@ Runtime log directory.
 
 Directory where invalid or unreadable PDFs are moved.
 
+`paths.deleted`
+
+Directory where PDFs moved by `paperlib delete` are stored.
+
 `paths.duplicates`
 
 Runtime directory reserved for duplicate handling.
@@ -114,21 +123,32 @@ Minimum word count used when classifying extraction quality.
 
 Enables AI summarization for plain `paperlib ingest` when set to `true`.
 
-`ai.provider`
-
-AI provider name. v1 implements Anthropic only.
-
 `ai.model`
 
-Anthropic model name used for AI summaries.
+AI model name used for summaries. Prefixes route requests to Anthropic,
+OpenAI, OpenRouter, or a generic OpenAI-compatible endpoint.
 
 `ai.max_tokens`
 
-Maximum tokens requested from the Anthropic API.
+Maximum tokens requested from the AI provider.
 
 `ai.temperature`
 
-Temperature passed to the Anthropic API.
+Temperature passed to the AI provider.
+
+`lookup.enabled`
+
+Set `true` to call Crossref and arXiv during ingest. The default is `false`
+for offline/local-only use.
+
+`lookup.mailto`
+
+Optional email address added to the Crossref `User-Agent` header for polite
+pool access. Leave empty to omit it.
+
+`lookup.timeout_sec`
+
+HTTP timeout in seconds for lookup calls.
 
 ## .env
 
@@ -170,5 +190,5 @@ The loaded `AppConfig` stores resolved `pathlib.Path` objects for
 If `ai.enabled = false`, ingest does not require `ANTHROPIC_API_KEY`.
 
 Plain `paperlib ingest` attempts AI summarization when `ai.enabled = true`. If
-the key is missing, affected summaries fail, records are still written, and
-non-AI commands continue to work.
+the configured provider key is missing, affected summaries fail, records are
+still written, and non-AI commands continue to work.

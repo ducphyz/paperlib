@@ -32,7 +32,7 @@ paperlib validate-config
 
 `library.root` must already exist. `validate-config` creates missing runtime
 subdirectories such as `inbox/`, `papers/`, `records/`, `text/`, `db/`,
-`logs/`, `failed/`, and `duplicates/`.
+`logs/`, `failed/`, `deleted/`, and `duplicates/`.
 
 ## Normal Non-AI Ingest
 
@@ -152,6 +152,95 @@ mv ~/PaperLibrary/failed/example.pdf ~/PaperLibrary/inbox/
 paperlib ingest --dry-run
 paperlib ingest --no-ai
 ```
+
+## Deleting a Paper
+
+Remove a paper from the active library:
+
+```bash
+paperlib delete <handle_id>
+```
+
+The PDF is moved to `deleted/`. The SQLite rows for the paper and its files are
+removed, and the JSON record and extracted text file are deleted.
+
+To undo a delete, move the PDF back to `inbox/` and run `paperlib ingest`.
+
+## Validating the Library
+
+Check that JSON records, SQLite index, PDFs, and text files are consistent:
+
+```bash
+paperlib validate-library
+```
+
+Findings are reported by severity (`error` or `warning`) and category:
+
+| Category | Meaning |
+|---|---|
+| MISSING_DB | SQLite database file not found |
+| BAD_JSON | JSON record file is invalid or unreadable |
+| JSON_NOT_IN_DB | JSON record has no matching SQLite row |
+| DB_NOT_IN_JSON | SQLite row points to a JSON file that does not exist |
+| MISSING_PDF | Canonical PDF path in JSON does not exist on disk |
+| MISSING_TEXT | Text file path in JSON does not exist on disk |
+| ORPHAN_PDF | PDF in `papers/` not referenced by any JSON record |
+
+For DB/JSON inconsistencies, run `paperlib rebuild-index` to repair. Missing
+PDFs and text files require manual recovery.
+
+## Re-summarising Records
+
+Re-run AI summarisation for records whose summary status is `skipped` or
+`failed`:
+
+```bash
+paperlib re-summarise
+paperlib re-summarise <handle_id>   # single record
+paperlib re-summarise --limit 5     # process at most 5 records
+paperlib re-summarise --no-ai       # mark all as skipped without calling AI
+```
+
+AI must be enabled in `config.toml` and `ANTHROPIC_API_KEY` or the configured
+provider key must be set. Summary failures remain non-fatal.
+
+## Exporting BibTeX
+
+Export all records as BibTeX:
+
+```bash
+paperlib export --bibtex
+```
+
+Export specific records:
+
+```bash
+paperlib export --bibtex <handle_id> [<handle_id> ...]
+```
+
+Write to a file:
+
+```bash
+paperlib export --bibtex --output refs.bib
+```
+
+Entry type is `@article` when a DOI is present, `@misc` otherwise. The cite key
+is the record's `handle_id` when available, otherwise `paper_id`.
+
+## Searching the Library
+
+Search by title, authors, or summary text:
+
+```bash
+paperlib search "Feynman"
+paperlib search "quantum" --field title
+paperlib search "Einstein" --field authors
+paperlib search "spin qubit" --field summary
+paperlib search "Josephson" --field all
+```
+
+`--field all` searches title and authors in SQLite and also scans JSON
+summaries. Output format matches `paperlib list`.
 
 ## Duplicate Behavior
 

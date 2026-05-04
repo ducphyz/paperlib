@@ -12,8 +12,13 @@ those records.
   relative to `library.root`, and returns an `AppConfig`.
 - `paperlib.pipeline` contains the ingest stages: discovery, validation,
   extraction, cleaning, metadata detection, summarisation, and orchestration.
+- `paperlib.pipeline.lookup` calls Crossref and arXiv APIs to fill metadata
+  fields during ingest.
+- `paperlib.export` formats records as BibTeX.
 - `paperlib.store` contains filesystem helpers, atomic text and JSON writes,
   SQLite indexing, and schema migrations.
+- `paperlib.store.validate_library` checks consistency across JSON, SQLite,
+  PDFs, and text files.
 - `paperlib.ai` contains the Anthropic client wrapper and summary prompt
   construction.
 - `paperlib.models` contains dataclasses for records, files, identity,
@@ -28,12 +33,13 @@ Given a configured `library.root`, v1 uses this layout:
 ```text
 {library_root}/
 ├── inbox/
-├── papers/{year}/{year}_{first_author}_{hash8}.pdf
+├── papers/{year}/{first_author}_{year}_{hash8}.pdf
 ├── records/{paper_id}.json
 ├── text/{hash16}.txt
 ├── db/library.db
 ├── logs/
 ├── failed/
+├── deleted/
 └── duplicates/
 ```
 
@@ -44,6 +50,7 @@ Given a configured `library.root`, v1 uses this layout:
 - `db/library.db` contains the SQLite index.
 - `logs/` is reserved for runtime logs.
 - `failed/` receives invalid or unreadable PDFs.
+- `deleted/` receives PDFs removed by `paperlib delete`.
 - `duplicates/` is part of the runtime layout for duplicate handling.
 
 ## Source of Truth
@@ -92,6 +99,8 @@ For each PDF selected from `inbox/`:
 4. Extract full text with `pdfplumber`.
 5. Clean extracted text.
 6. Identify DOI, arXiv ID, aliases, and target `paper_id`.
+6b. Optionally call Crossref or arXiv to fill title, authors, year, journal
+when `[lookup] enabled = true`.
 7. Decide the canonical filename.
 8. Move the PDF to `papers/{year}/`.
 9. Write cleaned text to `text/{hash16}.txt`.
@@ -109,7 +118,7 @@ write JSON, update SQLite, or call AI.
 Canonical PDF filenames use:
 
 ```text
-{year}_{first_author}_{hash8}.pdf
+{first_author}_{year}_{hash8}.pdf
 ```
 
 The containing directory is:
@@ -145,6 +154,5 @@ keeps JSON canonical and makes the SQLite index recoverable.
 v1 does not implement:
 
 - OCR
-- external metadata APIs
 - RAG
 - embeddings

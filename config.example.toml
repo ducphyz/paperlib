@@ -13,6 +13,7 @@ text = "text"
 db = "db/library.db"
 logs = "logs"
 failed = "failed"
+deleted = "deleted"
 duplicates = "duplicates"
 
 [pipeline]
@@ -59,3 +60,8 @@ temperature = 0.2
 # model = "openai-compat:local-model"
 # base_url = "http://localhost:11434/v1"
 # api_key_env = "LOCAL_AI_KEY"
+
+[lookup]
+enabled = false
+# mailto = "you@example.com"   # adds you to Crossref polite pool
+timeout_sec = 5.0              # HTTP timeout for Crossref/arXiv lookup

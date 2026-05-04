@@ -41,12 +41,6 @@ python -m pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
 ```
 
-Install the optional OpenAI-compatible dependency only when needed:
-
-```bash
-pip install -e ".[openai]"
-```
-
 ## Configuration
 
 Create local configuration files:
@@ -58,7 +52,8 @@ cp .env.example .env
 
 Edit `config.toml` and set `library.root` to the existing directory that should
 hold the paper library. `validate-config` creates runtime subdirectories such as
-`inbox/`, `papers/`, `records/`, `text/`, `db/`, `logs/`, and `failed/`.
+`inbox/`, `papers/`, `records/`, `text/`, `db/`, `logs/`, `failed/`, and
+`deleted/`.
 
 ```bash
 paperlib validate-config --config config.toml
@@ -101,6 +96,16 @@ Review records:
 ```bash
 paperlib mark-reviewed <handle_id>
 paperlib review <handle_id>
+```
+
+Search, export, validate, retry summaries, or delete records:
+
+```bash
+paperlib search "Feynman"
+paperlib export --bibtex
+paperlib validate-library
+paperlib re-summarise
+paperlib delete <handle_id>
 ```
 
 ## Identifiers
@@ -200,12 +205,6 @@ model = "claude-sonnet-4-20250514"
 # api_key_env = "LOCAL_AI_KEY"
 ```
 
-For OpenAI, OpenRouter, and OpenAI-compatible providers, install:
-
-```bash
-pip install -e ".[openai]"
-```
-
 AI failures are non-fatal. Ingest continues, writes the record, and marks the
 summary as failed.
 
@@ -225,11 +224,16 @@ paperlib list
 paperlib list --needs-review
 paperlib list --sort handle
 paperlib show <id_or_alias>
+paperlib delete <id_or_alias>
 paperlib rebuild-index
 paperlib rebuild-index --dry-run
 paperlib rebuild-index --no-backfill
 paperlib mark-reviewed <id_or_alias>
 paperlib review <id_or_alias>
+paperlib validate-library
+paperlib re-summarise
+paperlib export --bibtex
+paperlib search QUERY
 ```
 
 Per-command `--config` remains supported:
@@ -244,7 +248,8 @@ paperlib ingest --config config.toml --no-ai
 - No first-page text title/author heuristic yet; v1.1 uses embedded metadata
   and conservative filename heuristics.
 - No vector database, embeddings, or RAG in v1.1.
-- No external metadata APIs such as Crossref, Semantic Scholar, or arXiv lookup.
+- Crossref and arXiv lookup is available with `[lookup] enabled = true`.
+  Semantic Scholar is not implemented.
 - Embedded metadata is often incomplete or wrong and may still require review.
 - No web UI or TUI.
 - Provider-aware token and cost accounting is not implemented.
@@ -258,4 +263,4 @@ paperlib ingest --config config.toml --no-ai
 - [Limitations](docs/limitations.md)
 - [Roadmap](docs/roadmap.md)
 - [Source Inventory](docs/source_inventory.md)
-- [Changelog](CHANGELOG.md) for release history, including package version 0.1.1
+- [Changelog](CHANGELOG.md) for release history, including package version 1.2.0

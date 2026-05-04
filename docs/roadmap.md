@@ -15,8 +15,6 @@ Possible future OCR work:
 
 Possible future metadata integrations:
 
-- Crossref lookup
-- arXiv API lookup
 - Semantic Scholar lookup
 
 These would supplement, not replace, the canonical JSON record model.
@@ -33,7 +31,6 @@ Possible future duplicate handling:
 
 Possible future search features:
 
-- keyword search over metadata and summaries
 - full-text search over extracted text
 
 ## RAG
@@ -57,7 +54,6 @@ Possible future interfaces:
 
 Possible future export formats:
 
-- BibTeX
 - Markdown
 - CSV
 

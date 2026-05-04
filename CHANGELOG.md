@@ -4,6 +4,35 @@ All notable changes to PaperLib are documented here.
 
 This project follows the spirit of Keep a Changelog.
 
+## [v1.2] - 2026-05-04
+
+Feature milestone v1.2 is released as package version 1.2.0.
+
+### Added
+
+- `paperlib delete <id>` to remove a paper from the active library and move its
+  PDFs to `deleted/`.
+- `paperlib validate-library` read-only integrity checks for JSON records,
+  SQLite rows, PDFs, and text files.
+- `paperlib re-summarise [id] [--limit N] [--no-ai]` for retrying skipped or
+  failed summaries.
+- `paperlib export --bibtex [id ...] [--output FILE]` for BibTeX export.
+- `paperlib search QUERY` with title, authors, summary, and combined search
+  modes.
+- Optional Crossref/arXiv metadata lookup during ingest when
+  `[lookup] enabled = true`.
+
+### Changed
+
+- `openai` is now a required dependency instead of an optional extra.
+- `ruff` and `mypy` are included in the development extras.
+
+### Migration Notes
+
+- Run `paperlib validate-config` once after upgrading to create the new
+  `deleted/` runtime subdirectory.
+- No SQLite schema migration is needed for v1.2.
+
 ## [v1.1] - 2026-04-28
 
 Feature milestone v1.1 is released as package version 0.1.1.
