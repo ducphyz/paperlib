@@ -1,6 +1,6 @@
 # paperlib
 
-PaperLib is a local-first Python CLI for ingesting, indexing, reviewing, and
+paperlib is a local-first Python CLI for ingesting, indexing, reviewing, and
 summarizing academic papers. It watches a configured `inbox/`, validates PDFs,
 extracts text and embedded metadata, creates canonical JSON records, moves PDFs
 to stable filenames, and maintains a rebuildable SQLite index.
@@ -11,7 +11,7 @@ SQLite is only an index.
 
 ## Architecture
 
-PaperLib stores each paper as a JSON record under `records/`. Those JSON records
+paperlib stores each paper as a JSON record under `records/`. Those JSON records
 are canonical. If JSON and SQLite disagree, JSON wins.
 
 SQLite is rebuildable:
@@ -27,7 +27,7 @@ The two main identifiers are:
 - `handle_id`: human-friendly identity such as `smith_2014`, generated from
   author and year when possible.
 
-PaperLib also stores aliases such as `doi:...`, `arxiv:...`, and
+paperlib also stores aliases such as `doi:...`, `arxiv:...`, and
 `hash:<hash16>` for lookup.
 
 ## Installation
@@ -143,7 +143,7 @@ paperlib show hash:0440c911081cc43b
 
 Non-AI ingest uses embedded PDF metadata and conservative filename heuristics to
 populate title, authors, and year when possible. Unknown metadata remains
-`null`; PaperLib does not fabricate values.
+`null`; paperlib does not fabricate values.
 
 Canonical PDF paths keep the year directory and use author-first filenames:
 

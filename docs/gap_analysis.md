@@ -1,4 +1,4 @@
-# PaperLib Functional Gap Analysis
+# paperlib functional gap analysis
 
 ## Summary table
 

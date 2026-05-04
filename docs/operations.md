@@ -7,7 +7,7 @@ This guide covers practical `paperlib` v1 usage.
 Create the library root:
 
 ```bash
-mkdir -p ~/PaperLibrary
+mkdir -p ~/paperlib
 ```
 
 Create local config files:
@@ -21,7 +21,7 @@ Edit `config.toml` and set `library.root`:
 
 ```toml
 [library]
-root = "/Users/you/PaperLibrary"
+root = "/Users/you/paperlib"
 ```
 
 Validate the config:
@@ -39,7 +39,7 @@ subdirectories such as `inbox/`, `papers/`, `records/`, `text/`, `db/`,
 Copy PDFs into the configured inbox:
 
 ```bash
-cp ~/Downloads/*.pdf ~/PaperLibrary/inbox/
+cp ~/Downloads/*.pdf ~/paperlib/inbox/
 ```
 
 Inspect the batch without writing files, moving PDFs, updating SQLite, or
@@ -148,7 +148,7 @@ Inspect failed files manually. If a file can be fixed, move it back to
 `inbox/` and run the normal ingest flow again:
 
 ```bash
-mv ~/PaperLibrary/failed/example.pdf ~/PaperLibrary/inbox/
+mv ~/paperlib/failed/example.pdf ~/paperlib/inbox/
 paperlib ingest --dry-run
 paperlib ingest --no-ai
 ```

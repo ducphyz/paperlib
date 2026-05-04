@@ -14,7 +14,7 @@ cp .env.example .env
 
 ```toml
 [library]
-root = "/Users/you/PaperLibrary"
+root = "/Users/you/paperlib"
 
 [paths]
 inbox = "inbox"

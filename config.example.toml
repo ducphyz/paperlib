@@ -1,5 +1,5 @@
 # This example validates from the repository root. After copying it to
-# config.toml, change library.root to your real PaperLib directory before
+# config.toml, change library.root to your real paperlib directory before
 # ingesting papers.
 
 [library]

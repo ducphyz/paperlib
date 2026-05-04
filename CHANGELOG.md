@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to PaperLib are documented here.
+All notable changes to paperlib are documented here.
 
 This project follows the spirit of Keep a Changelog.
 

@@ -26,7 +26,7 @@ from paperlib.store.validate_library import validate_library
 from paperlib.utils import resolve_library_path, utc_now
 
 
-CONFIG_HELP = "Path to the PaperLib config TOML file."
+CONFIG_HELP = "Path to the paperlib config TOML file."
 _LIST_SEPARATOR = "  "
 _LIST_COLUMN_WIDTHS = {
     "handle_id": 20,
