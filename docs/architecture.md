@@ -98,17 +98,18 @@ For each PDF selected from `inbox/`:
 3. Validate readability and sampled text presence.
 4. Extract full text with `pdfplumber`.
 5. Clean extracted text.
-6. Identify DOI, arXiv ID, aliases, and target `paper_id`.
-6b. Optionally call Crossref or arXiv to fill title, authors, year, journal
-when `[lookup] enabled = true`.
-7. Decide the canonical filename.
-8. Move the PDF to `papers/{year}/`.
-9. Write cleaned text to `text/{hash16}.txt`.
-10. Build deterministic metadata fields.
-11. Optionally summarise with AI.
-12. Write the JSON record.
-13. Update SQLite in a transaction.
-14. Log the processing run.
+6. Extract non-AI metadata (DOI, arXiv ID, year) and build metadata fields.
+7. Identify aliases and target `paper_id`.
+8. Optionally call Crossref or arXiv to fill title, authors, year, journal
+   when `[lookup] enabled = true`.
+9. Assign `handle_id` (generated from enriched author/year after lookup).
+10. Decide the canonical filename.
+11. Move the PDF to `papers/{year}/`.
+12. Write cleaned text to `text/{hash16}.txt`.
+13. Optionally summarise with AI.
+14. Write the JSON record.
+15. Update SQLite in a transaction.
+16. Log the processing run.
 
 Dry runs stop at discovery and validation. They do not move PDFs, write text,
 write JSON, update SQLite, or call AI.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,7 +167,7 @@ def ingest_library(
 
 def _ingest_pdf(
     config: AppConfig,
-    conn,
+    conn: sqlite3.Connection,
     pdf: DiscoveredPDF,
     report: IngestReport,
     *,

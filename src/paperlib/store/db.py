@@ -23,7 +23,7 @@ class IdNotFound(LookupError):
     pass
 
 
-def connect(db_path) -> sqlite3.Connection:
+def connect(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)

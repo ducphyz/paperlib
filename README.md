@@ -234,6 +234,8 @@ paperlib validate-library
 paperlib re-summarise
 paperlib export --bibtex
 paperlib search QUERY
+paperlib search QUERY --field title|authors|summary|all
+paperlib search QUERY --sort year|handle
 ```
 
 Per-command `--config` remains supported:
@@ -245,9 +247,9 @@ paperlib ingest --config config.toml --no-ai
 ## Known Limitations
 
 - No OCR. Scanned PDFs are detected but not text-extracted.
-- No first-page text title/author heuristic yet; v1.1 uses embedded metadata
+- No first-page text title/author heuristic; v1.2 uses embedded metadata
   and conservative filename heuristics.
-- No vector database, embeddings, or RAG in v1.1.
+- No vector database, embeddings, or RAG.
 - Crossref and arXiv lookup is available with `[lookup] enabled = true`.
   Semantic Scholar is not implemented.
 - Embedded metadata is often incomplete or wrong and may still require review.

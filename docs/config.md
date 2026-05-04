@@ -136,6 +136,25 @@ Maximum tokens requested from the AI provider.
 
 Temperature passed to the AI provider.
 
+`ai.provider`
+
+Legacy field retained for backwards compatibility. If set to `"anthropic"`,
+routes requests to Anthropic regardless of the model prefix. Prefer the
+model-prefix routing (`anthropic:`, `openai:`, `openrouter:`, `openai-compat:`)
+in new configs.
+
+`ai.base_url`
+
+Custom base URL for OpenAI-compatible endpoints. Required when using
+`openai-compat:<model>`. Optional for `openrouter:` (defaults to
+`https://openrouter.ai/api/v1`).
+
+`ai.api_key_env`
+
+Name of the environment variable to read the API key from. Overrides the
+provider default (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`).
+Useful for local or custom endpoints.
+
 `lookup.enabled`
 
 Set `true` to call Crossref and arXiv during ingest. The default is `false`
