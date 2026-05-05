@@ -17,7 +17,7 @@ eliminate duplicated utilities across pipeline, store, and CLI.
 | `src/paperlib/ai/__init__.py` | 0 | Package marker. |
 | `src/paperlib/ai/client.py` | 203 | AI provider dispatch: Anthropic, OpenAI, OpenRouter, OpenAI-compatible. |
 | `src/paperlib/ai/prompts.py` | 62 | Summary prompt builder and prompt version constant. |
-| `src/paperlib/cli.py` | 1226 | All CLI commands, display formatting, shared ID resolution, config/DB lifecycle. |
+| `src/paperlib/cli.py` | 1269 | All CLI commands, display formatting, shared ID resolution, config/DB lifecycle. |
 | `src/paperlib/config.py` | 228 | TOML and `.env` loading, path resolution, AI and lookup config. |
 | `src/paperlib/export.py` | 84 | BibTeX formatter: cite-key rules, entry types, field escaping. |
 | `src/paperlib/handle.py` | 99 | `handle_id` generation with collision suffix handling. |
@@ -39,14 +39,14 @@ eliminate duplicated utilities across pipeline, store, and CLI.
 | `src/paperlib/pipeline/validate.py` | 58 | PDF readability and text presence validation. |
 | `src/paperlib/review.py` | 301 | Interactive metadata review, field locking, identity edits, review status. |
 | `src/paperlib/store/__init__.py` | 0 | Package marker. |
-| `src/paperlib/store/db.py` | 704 | SQLite indexing, ID resolution, aliases, ingest transactions, search, rebuild-index. |
+| `src/paperlib/store/db.py` | 707 | SQLite indexing, ID resolution, aliases, ingest transactions, search, rebuild-index. |
 | `src/paperlib/store/fs.py` | 220 | Hashing, canonical paths, atomic writes, file moves to failed/deleted/duplicates. |
 | `src/paperlib/store/json_store.py` | 49 | Atomic JSON record read/write. |
 | `src/paperlib/store/migrations.py` | 109 | SQLite schema creation and migration. |
 | `src/paperlib/store/validate_library.py` | 116 | Cross-layer integrity checks: JSON, SQLite, PDFs, text files. |
 | `src/paperlib/utils.py` | 39 | Shared utilities: `utc_now`, `field_exists`, `metadata_status`, `resolve_library_path`. |
 
-Total: 5,570 lines.
+Total: 5,616 lines.
 
 ## Tests
 
@@ -54,9 +54,9 @@ Total: 5,570 lines.
 | --- | ---: | --- |
 | `tests/test_ai_client.py` | 369 | AI provider parsing, dispatch, missing-dependency handling. |
 | `tests/test_clean.py` | 34 | Text cleaning and whitespace normalization. |
-| `tests/test_cli.py` | 1694 | All CLI commands. |
+| `tests/test_cli.py` | 1735 | All CLI commands. |
 | `tests/test_config.py` | 239 | Config loading, AI/lookup config, path resolution, API key handling. |
-| `tests/test_db.py` | 893 | Schema, migrations, aliases, ID resolution, search, rebuild-index. |
+| `tests/test_db.py` | 894 | Schema, migrations, aliases, ID resolution, search, rebuild-index. |
 | `tests/test_discover.py` | 43 | Inbox discovery and file hash metadata. |
 | `tests/test_docs.py` | 86 | Changelog, README, config example smoke checks. |
 | `tests/test_export.py` | 186 | BibTeX formatting, cite-key rules, entry types, CLI export. |
@@ -77,7 +77,7 @@ Total: 5,570 lines.
 | `tests/test_validate.py` | 102 | PDF validation success and failure. |
 | `tests/test_validate_library.py` | 232 | Integrity checks: missing DB, bad JSON, missing PDF/text, orphan PDFs. |
 
-Total: 7,915 lines.
+Total: 7,957 lines.
 
 ## Known limitations
 

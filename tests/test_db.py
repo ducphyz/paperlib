@@ -311,6 +311,7 @@ def test_get_record_path_returns_path_for_existing_paper(tmp_path: Path):
 def test_list_papers_returns_inserted_row(tmp_path: Path):
     conn = _conn(tmp_path)
     db.upsert_paper(conn, _record("p_abc"), "records/p_abc.json")
+    db.insert_file(conn, "p_abc", _file())
 
     rows = db.list_papers(conn)
 
@@ -320,8 +321,8 @@ def test_list_papers_returns_inserted_row(tmp_path: Path):
             "paper_id": "p_abc",
             "title": "A Paper",
             "authors_json": '["Ada", "Grace"]',
-            "year": 2024,
             "review_status": "needs_review",
+            "added_at": "2026-04-25T00:00:00Z",
         }
     ]
 

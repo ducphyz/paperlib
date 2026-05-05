@@ -136,8 +136,8 @@ paperlib show arxiv:2401.12345
 paperlib show hash:0440c911081cc43b
 ```
 
-`paperlib list` shows `handle_id` by default. Use `--no-handle` to hide it or
-`--sort handle` to sort by handle.
+`paperlib list` shows `handle_id` by default. Use `--paper-id` to add the
+internal `paper_id` column or `--sort handle` to sort by handle.
 
 ## Ingest Behavior
 
@@ -222,6 +222,7 @@ paperlib ingest --limit N
 paperlib status
 paperlib list
 paperlib list --needs-review
+paperlib list --paper-id
 paperlib list --sort handle
 paperlib show <id_or_alias>
 paperlib delete <id_or_alias>

@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import os
+import shutil
 import tomllib
 
 import pytest
@@ -13,7 +15,13 @@ from conftest import (
     _write_show_fixture,
 )
 from paperlib.__about__ import __version__
-from paperlib.cli import main
+from paperlib.cli import (
+    _format_list_header,
+    _format_list_rows,
+    _list_title_width,
+    _wrap_hyphen,
+    main,
+)
 from paperlib.models.file import FileRecord
 from paperlib.models.record import PaperRecord
 from paperlib.pipeline.discover import DiscoveredPDF
@@ -36,35 +44,48 @@ CLI_COMMANDS = (
     "review",
 )
 
-LIST_HEADER = (
-    f"{'handle_id':<20}  {'paper_id':<18}  {'year':<9}  "
-    f"{'first_author':<20}  {'title':<57}  {'review_status':<12}"
-)
-LIST_HEADER_NO_HANDLE = (
-    f"{'paper_id':<18}  {'year':<9}  {'first_author':<20}  "
-    f"{'title':<57}  {'review_status':<12}"
-)
+def _current_title_width(*, show_paper_id: bool) -> int:
+    return _list_title_width(
+        shutil.get_terminal_size().columns,
+        show_paper_id,
+    )
+
+
+def _expected_list_header(*, show_paper_id: bool = False) -> str:
+    return _format_list_header(
+        show_paper_id=show_paper_id,
+        title_width=_current_title_width(show_paper_id=show_paper_id),
+    )
 
 
 def _expected_list_row(
     *,
     paper_id: str,
-    year: str,
-    first_author: str,
     title: str,
     review_status: str,
     handle_id: str | None = None,
+    authors_json=None,
+    added_at: str | None = "2026-04-26T00:00:00Z",
+    first_author: str | None = None,
+    show_paper_id: bool = False,
 ) -> str:
-    values = [
-        f"{paper_id:<18}",
-        f"{year:<9}",
-        f"{first_author:<20}",
-        f"{title:<57}",
-        f"{review_status:<12}",
-    ]
-    if handle_id is not None:
-        values.insert(0, f"{handle_id:<20}")
-    return "  ".join(values)
+    if authors_json is None and first_author not in (None, "<unknown>", "?"):
+        authors_json = json.dumps([first_author])
+    row = {
+        "handle_id": handle_id,
+        "paper_id": paper_id,
+        "title": title,
+        "authors_json": authors_json,
+        "review_status": review_status,
+        "added_at": added_at,
+    }
+    return "\n".join(
+        _format_list_rows(
+            row,
+            show_paper_id=show_paper_id,
+            title_width=_current_title_width(show_paper_id=show_paper_id),
+        )
+    )
 
 
 def _write_delete_fixture(root: Path, config_path: Path) -> dict:
@@ -125,6 +146,24 @@ def _write_delete_fixture(root: Path, config_path: Path) -> dict:
         "text_path": text_path,
         "deleted_pdf_path": root / "deleted" / "delete.pdf",
     }
+
+
+def test_wrap_hyphen_wraps_on_spaces():
+    assert _wrap_hyphen("alpha beta gamma", 10) == [
+        "alpha beta",
+        "gamma",
+    ]
+
+
+def test_wrap_hyphen_hard_breaks_long_word():
+    assert _wrap_hyphen("supercalif", 6) == ["super-", "calif"]
+
+
+def test_wrap_hyphen_splits_hyphenated_word_across_lines():
+    assert _wrap_hyphen("alpha beta-gamma-delta", 17) == [
+        "alpha beta-gamma-",
+        "delta",
+    ]
 
 
 def test_root_version_prints_project_version():
@@ -248,7 +287,8 @@ def test_list_help_documents_existing_options():
 
     assert result.exit_code == 0
     assert "--needs-review" in result.output
-    assert "--no-handle" in result.output
+    assert "--paper-id" in result.output
+    assert "--no-handle" not in result.output
     assert "--sort" in result.output
 
 
@@ -1004,15 +1044,14 @@ def test_list_prints_missing_title_unknown_author_and_truncated_title(
     result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert LIST_HEADER in result.output
+    assert _expected_list_header() in result.output
     assert (
         _expected_list_row(
             handle_id="<none>",
             paper_id="p_missing",
-            year="<unknown>",
-            first_author="<unknown>",
             title="<no title>",
             review_status="needs_review",
+            authors_json=None,
         )
         in result.output
     )
@@ -1020,16 +1059,21 @@ def test_list_prints_missing_title_unknown_author_and_truncated_title(
         _expected_list_row(
             handle_id="long_2025",
             paper_id="p_long",
-            year="2025",
-            first_author="Alexandria Cassandra",
-            title=f"{'L' * 54}...",
+            authors_json='["Alexandria Cassandra Long", "Grace Hopper"]',
+            title=long_title,
             review_status="reviewed",
         )
         in result.output
     )
 
 
-def test_list_no_handle_hides_handle_column(tmp_path: Path):
+def test_list_paper_id_adds_paper_id_column(tmp_path: Path, monkeypatch):
+    terminal_size = lambda: os.terminal_size((120, 24))
+    monkeypatch.setattr(
+        "paperlib.cli.shutil.get_terminal_size",
+        terminal_size,
+    )
+    monkeypatch.setattr(shutil, "get_terminal_size", terminal_size)
     root = tmp_path / "library"
     root.mkdir()
     config_path = tmp_path / "config.toml"
@@ -1044,22 +1088,82 @@ def test_list_no_handle_hides_handle_column(tmp_path: Path):
     )
 
     result = CliRunner().invoke(
-        main, ["list", "--no-handle", "--config", str(config_path)]
+        main, ["list", "--paper-id", "--config", str(config_path)]
     )
 
     assert result.exit_code == 0
-    assert LIST_HEADER_NO_HANDLE in result.output
-    assert "row_2024" not in result.output
+    assert _expected_list_header(show_paper_id=True) in result.output
+    assert "row_2024" in result.output
     assert (
         _expected_list_row(
+            handle_id="row_2024",
             paper_id="p_row",
-            year="2024",
-            first_author="Ada",
+            authors_json='["Ada"]',
             title="A Row",
             review_status="needs_review",
+            show_paper_id=True,
         )
         in result.output
     )
+
+
+def test_list_paper_id_column_shows_on_narrow_terminal(
+    tmp_path: Path,
+    monkeypatch,
+):
+    terminal_size = lambda: os.terminal_size((80, 24))
+    monkeypatch.setattr(
+        "paperlib.cli.shutil.get_terminal_size",
+        terminal_size,
+    )
+    monkeypatch.setattr(shutil, "get_terminal_size", terminal_size)
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    _insert_list_row(
+        root,
+        paper_id="p_narrow",
+        handle_id="narrow_2024",
+        title="A Narrow Terminal Row",
+        authors_json='["Ada Lovelace"]',
+        year=2024,
+    )
+
+    result = CliRunner().invoke(
+        main, ["list", "--paper-id", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "paper_id" in result.output.splitlines()[0]
+    assert "p_narrow" in result.output
+
+
+def test_list_rows_fit_terminal_width_minus_two(tmp_path: Path, monkeypatch):
+    terminal_size = lambda: os.terminal_size((80, 24))
+    monkeypatch.setattr(
+        "paperlib.cli.shutil.get_terminal_size",
+        terminal_size,
+    )
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    _insert_list_row(
+        root,
+        paper_id="p_fit",
+        handle_id="fit_2024",
+        title="A long title that should wrap before it exceeds the terminal",
+        authors_json='["Ada Lovelace"]',
+        year=2024,
+    )
+
+    result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    for line in result.output.splitlines():
+        if line:
+            assert len(line) <= 78
 
 
 def test_list_needs_review_filters_rows(tmp_path: Path):
@@ -1095,8 +1199,7 @@ def test_list_needs_review_filters_rows(tmp_path: Path):
         _expected_list_row(
             handle_id="needs_2024",
             paper_id="p_needs",
-            year="2024",
-            first_author="Ada",
+            authors_json='["Ada"]',
             title="Needs Review",
             review_status="needs_review",
         )
@@ -1126,8 +1229,7 @@ def test_list_invalid_authors_json_prints_unknown(tmp_path: Path):
         _expected_list_row(
             handle_id="bad_authors_2024",
             paper_id="p_bad_authors",
-            year="2024",
-            first_author="<unknown>",
+            authors_json="{bad json",
             title="Bad Authors",
             review_status="needs_review",
         )
@@ -1166,8 +1268,7 @@ def test_list_sort_handle_sorts_by_handle_id(tmp_path: Path):
         _expected_list_row(
             handle_id="zeta_2024",
             paper_id="p_zeta",
-            year="2024",
-            first_author="Zed",
+            authors_json='["Zed"]',
             title="Zeta",
             review_status="needs_review",
         )
@@ -1177,14 +1278,41 @@ def test_list_sort_handle_sorts_by_handle_id(tmp_path: Path):
         _expected_list_row(
             handle_id="alpha_2024",
             paper_id="p_alpha",
-            year="2023",
-            first_author="Ada",
+            authors_json='["Ada"]',
             title="Alpha",
             review_status="needs_review",
         )
         in result.output
     )
     assert result.output.index("alpha_2024") < result.output.index("zeta_2024")
+
+
+def test_list_groups_rows_in_pairs_with_blank_lines(tmp_path: Path):
+    root = tmp_path / "library"
+    root.mkdir()
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path, root)
+    for index in range(3):
+        _insert_list_row(
+            root,
+            paper_id=f"p_group_{index}",
+            handle_id=f"group_{index}",
+            title=f"Group {index}",
+            authors_json='["Ada Lovelace"]',
+            year=2024 - index,
+        )
+
+    result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    assert lines[0] == _expected_list_header()
+    assert lines[1] == ""
+    row_indexes = [
+        index for index, line in enumerate(lines) if line.startswith("group_")
+    ]
+    assert row_indexes == [2, 3, 5]
+    assert lines[4] == ""
 
 
 def test_list_after_cli_ingest_prints_ingested_row(tmp_path: Path):
@@ -1204,15 +1332,15 @@ def test_list_after_cli_ingest_prints_ingested_row(tmp_path: Path):
     result = CliRunner().invoke(main, ["list", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert record.paper_id in result.output
+    assert record.handle_id in result.output
     assert (
         _expected_list_row(
             handle_id=record.handle_id or "<none>",
             paper_id=record.paper_id,
-            year="2024",
-            first_author="<unknown>",
             title="<no title>",
             review_status="needs_review",
+            authors_json=None,
+            added_at=record.files[0].added_at,
         )
         in result.output
     )
@@ -1665,7 +1793,7 @@ def test_search_output_header_matches_list_header(tmp_path: Path):
 
     assert result.exit_code == 0
     first_line = result.output.splitlines()[0]
-    assert first_line == LIST_HEADER
+    assert first_line == _expected_list_header()
 
 
 def test_search_column_widths_match_list_format(tmp_path: Path):
@@ -1688,7 +1816,8 @@ def test_search_column_widths_match_list_format(tmp_path: Path):
 
     assert result.exit_code == 0
     lines = result.output.splitlines()
-    assert len(lines) >= 2
+    data_lines = [line for line in lines[1:] if line]
+    assert data_lines
     # Data row uses the same fixed-width formatting as list
-    assert "col_2024" in lines[1]
-    assert "Column Width Paper" in lines[1]
+    assert "col_2024" in data_lines[0]
+    assert "Column Width Paper" in data_lines[0]

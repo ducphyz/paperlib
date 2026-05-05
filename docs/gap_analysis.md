@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | GAP-1 | `paperlib re-summarise` | Medium | Reuses `summarise_record`, but must reconstruct ingest's cleaned-text and source-file context from JSON/file storage and keep JSON and SQLite in sync. |
 | GAP-2 | `paperlib validate-library` | Medium | Cross-checks JSON, SQLite, PDFs, and text files; must remain read-only and avoid accidentally creating a missing SQLite database. |
-| GAP-3 | `paperlib list` alignment | Low | Formatting is inline in `cli.py`; existing CLI tests assert exact unpadded output and will need updates. |
+| GAP-3 | `paperlib list` alignment | Low | Shared fixed-width formatting is implemented in `cli.py`; CLI tests cover the table layout. |
 | GAP-4 | Crossref/arXiv lookup | High | Adds network metadata into ingest before summarisation; must respect locks, avoid new dependency drift, and define timeout/error behavior. |
 | GAP-5 | `paperlib export --bibtex` | Medium | Needs reusable ID resolution/all-record loading and careful plain-text BibTeX escaping without adding dependencies. |
 | GAP-6 | `paperlib search` | Medium | Depends on SQLite title/authors columns, JSON summary storage, and preferably a reusable list-output formatter from GAP-3. |
@@ -83,17 +83,16 @@ The command is conceptually read-only, but it crosses every persistence layer an
 
 ### Insertion points
 
-- `src/paperlib/cli.py`, `list_command`: list formatting is currently inline. It builds `columns`, prints `" | ".join(columns)`, then builds `values` and prints `" | ".join(values)`.
-- `src/paperlib/cli.py`, helpers `_first_author` and `_truncate_title`: `_truncate_title` already truncates values longer than 60 characters to 57 characters plus `...`, matching the suggested visible title width of 60 rather than the prompt's "title 57" wording.
-- A new helper in `cli.py` such as a private row formatter would make GAP-6 search output reusable. There is no shared list formatting function today.
+- `src/paperlib/cli.py`, `list_command`: list formatting now uses shared fixed-width helpers for list and search output.
+- `src/paperlib/cli.py`, helpers `_format_author`, `_wrap_hyphen`, `_list_title_width`, `_format_list_rows`, and `_format_list_header`: these own author formatting, dynamic title width, standard wrapping, and `--paper-id` truncation.
+- Search output reuses the same list formatting helpers.
 
 ### Difficulties
 
-- Existing tests assert exact unpadded pipe-separated substrings in `tests/test_cli.py`, especially `test_list_prints_missing_title_unknown_author_and_truncated_title`, `test_list_no_handle_hides_handle_column`, `test_list_needs_review_filters_rows`, `test_list_invalid_authors_json_prints_unknown`, and `test_list_after_cli_ingest_prints_ingested_row`.
-- `--no-handle` changes the column count by removing `handle_id`, so the formatter must support two schemas or dynamically omit that column while preserving widths for the remaining columns.
-- Suggested widths need a precise interpretation. The current `_truncate_title` returns 60 visible characters for long titles, while the prompt says "title 57 (truncated with ... beyond 57 chars)", which could mean 57 total including ellipsis or 57 plus ellipsis. Tests should lock down the intended behavior before implementation.
-- Missing values currently render as `<none>`, `<unknown>`, and `<no title>`. Padding must preserve those strings.
-- Pipe separators can remain if desired, but fixed-width padding means tests should avoid brittle full-line matching unless the full table contract is intended.
+- Tests now cover fixed-width headers, wrapped titles, `--paper-id` output, and the shared wrapping helper.
+- `--paper-id` always adds the internal ID column. The title column shrinks to
+  fit the terminal width minus two columns.
+- Missing values render as `<none>`, `?`, blank added date, and `<no title>`.
 
 ### Entanglements
 
@@ -187,7 +186,7 @@ No new dependencies or persistence changes are needed, but correct escaping, sta
 - Multi-word query behavior is not defined by existing code. A direct `LIKE '%query%'` gives phrase semantics. AND/OR token semantics would need explicit design and tests.
 - SQL injection must be avoided with parameterized queries. Existing DB code uses parameters for user input in point lookups; `list_papers` uses f-strings only for internal predicates/order clauses selected from known values. Search should not interpolate the query into SQL.
 - Literal `%` and `_` in user queries have wildcard meaning in SQL LIKE. The implementation should decide whether to treat them as wildcards or escape them for literal keyword search.
-- Output "matching paperlib list" is easiest after GAP-3 creates a shared formatter; otherwise search will duplicate current inline list formatting and then need later rework.
+- Output matching `paperlib list` now reuses the shared list formatter from GAP-3.
 
 ### Entanglements
 

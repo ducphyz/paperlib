@@ -140,6 +140,23 @@ def _insert_list_row(
                 now,
             ),
         )
+        conn.execute(
+            """
+            INSERT INTO files (
+                file_hash, paper_id, original_name, canonical_path, text_path,
+                size_bytes, extraction_status, added_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, 'ok', ?)
+            """,
+            (
+                f"{paper_id}_hash",
+                paper_id,
+                "paper.pdf",
+                f"papers/{paper_id}.pdf",
+                f"text/{paper_id}.txt",
+                now,
+            ),
+        )
         conn.commit()
     finally:
         conn.close()

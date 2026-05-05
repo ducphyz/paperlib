@@ -398,19 +398,22 @@ def list_papers(
     needs_review: bool = False,
     sort: str = "year",
 ) -> list[dict]:
-    where = "WHERE review_status = 'needs_review'" if needs_review else ""
+    where = "WHERE p.review_status = 'needs_review'" if needs_review else ""
     if sort == "handle":
-        order_by = "handle_id IS NULL ASC, handle_id ASC, paper_id ASC"
+        order_by = "p.handle_id IS NULL ASC, p.handle_id ASC, p.paper_id ASC"
     elif sort == "year":
-        order_by = "year IS NULL ASC, year DESC, paper_id ASC"
+        order_by = "p.year IS NULL ASC, p.year DESC, p.paper_id ASC"
     else:
         raise ValueError(f"unsupported paper sort: {sort}")
 
     rows = conn.execute(
         f"""
-        SELECT handle_id, paper_id, title, authors_json, year, review_status
-        FROM papers
+        SELECT p.handle_id, p.paper_id, p.title, p.authors_json,
+               p.review_status, MIN(f.added_at) AS added_at
+        FROM papers p
+        LEFT JOIN files f ON f.paper_id = p.paper_id
         {where}
+        GROUP BY p.paper_id
         ORDER BY {order_by}
         """
     ).fetchall()

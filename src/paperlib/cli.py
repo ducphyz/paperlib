@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -27,16 +28,6 @@ from paperlib.utils import resolve_library_path, utc_now
 
 
 CONFIG_HELP = "Path to the paperlib config TOML file."
-_LIST_SEPARATOR = "  "
-_LIST_COLUMN_WIDTHS = {
-    "handle_id": 20,
-    "paper_id": 18,
-    "year": 9,
-    "first_author": 20,
-    "title": 57,
-    "review_status": 12,
-}
-_LIST_COLUMNS = ("paper_id", "year", "first_author", "title", "review_status")
 
 
 @click.group(name=__title__, help=__description__)
@@ -796,9 +787,10 @@ def review(id_or_alias: str, config_path: str) -> None:
     help="Only show papers whose review status is needs_review.",
 )
 @click.option(
-    "--no-handle",
+    "--paper-id",
+    "show_paper_id",
     is_flag=True,
-    help="Hide the handle_id column.",
+    help="Add paper_id column; truncate title to single line.",
 )
 @click.option(
     "--sort",
@@ -816,7 +808,10 @@ def review(id_or_alias: str, config_path: str) -> None:
     help=CONFIG_HELP,
 )
 def list_command(
-    needs_review: bool, no_handle: bool, sort_by: str, config_path: str
+    needs_review: bool,
+    show_paper_id: bool,
+    sort_by: str,
+    config_path: str,
 ) -> None:
     try:
         config = load_config(config_path)
@@ -835,10 +830,27 @@ def list_command(
     finally:
         conn.close()
 
-    include_handle = not no_handle
-    click.echo(_format_list_header(include_handle=include_handle))
-    for row in rows:
-        click.echo(_format_list_row(row, include_handle=include_handle))
+    term_cols = shutil.get_terminal_size().columns
+    title_width = _list_title_width(term_cols, show_paper_id)
+    click.echo(
+        click.style(
+            _format_list_header(
+                show_paper_id=show_paper_id,
+                title_width=title_width,
+            ),
+            bold=True,
+        )
+    )
+    click.echo("")
+    for i, row in enumerate(rows):
+        if i > 0 and i % 2 == 0:
+            click.echo("")
+        for line in _format_list_rows(
+            row,
+            show_paper_id=show_paper_id,
+            title_width=title_width,
+        ):
+            click.echo(line)
 
 
 @main.command("export", help="Export records to an external format.")
@@ -1005,9 +1017,27 @@ def search_command(query: str, field: str, sort_by: str, config_path: str) -> No
         click.echo("no results")
         return
 
-    click.echo(_format_list_header(include_handle=True))
-    for row in rows:
-        click.echo(_format_list_row(row, include_handle=True))
+    term_cols = shutil.get_terminal_size().columns
+    title_width = _list_title_width(term_cols, show_paper_id=False)
+    click.echo(
+        click.style(
+            _format_list_header(
+                show_paper_id=False,
+                title_width=title_width,
+            ),
+            bold=True,
+        )
+    )
+    click.echo("")
+    for i, row in enumerate(rows):
+        if i > 0 and i % 2 == 0:
+            click.echo("")
+        for line in _format_list_rows(
+            row,
+            show_paper_id=False,
+            title_width=title_width,
+        ):
+            click.echo(line)
 
 
 def _print_ingest_report(report) -> None:
@@ -1033,36 +1063,151 @@ def _setup_command_logging(config: AppConfig, *, debug: bool) -> logging.Logger:
     return logger
 
 
-def _format_year(value) -> str:
-    return "<unknown>" if value is None else str(value)
+def _format_author(authors_json) -> str:
+    if not authors_json:
+        return "?"
+    try:
+        authors = json.loads(authors_json)
+    except (TypeError, json.JSONDecodeError):
+        return "?"
+    if not isinstance(authors, list) or not authors:
+        return "?"
+    first = authors[0]
+    if not isinstance(first, str) or not first.strip():
+        return "?"
+    tokens = [token for token in first.split() if token]
+    if not tokens:
+        return "?"
+    formatted = f"{tokens[0][0]}. {tokens[-1]}"
+    return formatted[:12]
 
 
-def _format_list_header(*, include_handle: bool) -> str:
-    columns = list(_LIST_COLUMNS)
-    if include_handle:
-        columns.insert(0, "handle_id")
-    return _LIST_SEPARATOR.join(
-        column.ljust(_LIST_COLUMN_WIDTHS[column]) for column in columns
+def _wrap_hyphen(text: str, width: int) -> list[str]:
+    width = max(1, width)
+    words = text.split()
+    if not words:
+        return [""]
+
+    lines: list[str] = []
+    current = ""
+
+    def hard_break(word: str) -> None:
+        nonlocal current
+        while len(word) > width:
+            if width == 1:
+                lines.append(word[:1])
+                word = word[1:]
+                continue
+            lines.append(f"{word[:width - 1]}-")
+            word = word[width - 1:]
+        current = word
+
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if len(candidate) <= width:
+            current = candidate
+            continue
+
+        if not current:
+            hard_break(word)
+            continue
+
+        if "-" in word:
+            segments = [
+                f"{part}-" if index < len(word.split("-")) - 1 else part
+                for index, part in enumerate(word.split("-"))
+            ]
+            base = f"{current} "
+            fitted = ""
+            index = 0
+            while index < len(segments):
+                candidate = f"{base}{fitted}{segments[index]}"
+                if len(candidate) > width:
+                    break
+                fitted += segments[index]
+                index += 1
+
+            if fitted:
+                lines.append(f"{base}{fitted}".rstrip())
+                remaining = "".join(segments[index:])
+                current = ""
+                if remaining:
+                    if len(remaining) > width:
+                        hard_break(remaining)
+                    else:
+                        current = remaining
+                continue
+
+        lines.append(current)
+        current = ""
+        if len(word) > width:
+            hard_break(word)
+        else:
+            current = word
+
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _list_title_width(term_cols: int, show_paper_id: bool) -> int:
+    fixed = 18 + 2 + 12 + 2 + 2 + 10 + 2 + 7
+    if show_paper_id:
+        fixed += 2 + 18
+    return max(1, term_cols - 2 - fixed)
+
+
+def _format_list_rows(
+    row: dict,
+    *,
+    show_paper_id: bool,
+    title_width: int,
+) -> list[str]:
+    handle = (row.get("handle_id") or "<none>")[:18]
+    author = _format_author(row.get("authors_json"))[:12]
+    added = (row.get("added_at") or "")[:10]
+    status = (row.get("review_status") or "")[:7]
+    pid = str(row.get("paper_id") or "")[:18]
+    title = row.get("title") or "<no title>"
+
+    gap = "  "
+    if show_paper_id:
+        if len(title) <= title_width:
+            t = title
+        elif title_width <= 3:
+            t = title[:title_width]
+        else:
+            t = title[:title_width - 3] + "..."
+        line = (
+            f"{handle:<18}{gap}{author:<12}{gap}{t:<{title_width}}"
+            f"{gap}{added:<10}{gap}{status:<7}{gap}{pid:<18}"
+        )
+        return [line.rstrip()]
+
+    wrapped = _wrap_hyphen(title, title_width)
+    lines = []
+    for i, segment in enumerate(wrapped):
+        if i == 0:
+            line = (
+                f"{handle:<18}{gap}{author:<12}{gap}{segment:<{title_width}}"
+                f"{gap}{added:<10}{gap}{status:<7}"
+            )
+        else:
+            indent = " " * (18 + 2 + 12 + 2)
+            line = f"{indent}{segment}"
+        lines.append(line.rstrip())
+    return lines
+
+
+def _format_list_header(*, show_paper_id: bool, title_width: int) -> str:
+    gap = "  "
+    base = (
+        f"{'handle_id':<18}{gap}{'author':<12}{gap}{'title':<{title_width}}"
+        f"{gap}{'added':<10}{gap}{'status':<7}"
     )
-
-
-def _format_list_row(row: dict, *, include_handle: bool) -> str:
-    values = [
-        ("paper_id", str(row["paper_id"])),
-        ("year", _format_year(row.get("year"))),
-        (
-            "first_author",
-            _truncate_text(_first_author(row.get("authors_json")), 20),
-        ),
-        ("title", _truncate_title(row.get("title"))),
-        ("review_status", row.get("review_status") or ""),
-    ]
-    if include_handle:
-        values.insert(0, ("handle_id", row.get("handle_id") or "<none>"))
-    return _LIST_SEPARATOR.join(
-        str(value).ljust(_LIST_COLUMN_WIDTHS[column])
-        for column, value in values
-    )
+    if show_paper_id:
+        base += f"{gap}{'paper_id':<18}"
+    return base.rstrip()
 
 
 def _format_show_record(record: dict) -> dict:
@@ -1074,33 +1219,6 @@ def _format_show_record(record: dict) -> dict:
         if key not in formatted:
             formatted[key] = value
     return formatted
-
-
-def _first_author(authors_json) -> str:
-    if not authors_json:
-        return "<unknown>"
-    try:
-        authors = json.loads(authors_json)
-    except (TypeError, json.JSONDecodeError):
-        return "<unknown>"
-    if not isinstance(authors, list) or not authors:
-        return "<unknown>"
-    first = authors[0]
-    if not isinstance(first, str) or not first.strip():
-        return "<unknown>"
-    return first.strip()
-
-
-def _truncate_title(value) -> str:
-    if not value:
-        return "<no title>"
-    return value if len(value) <= 57 else f"{value[:54]}..."
-
-
-def _truncate_text(value: str, width: int) -> str:
-    return value if len(value) <= width else value[:width]
-
-
 
 
 def _print_dry_run_table(pdfs) -> None:
