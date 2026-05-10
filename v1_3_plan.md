@@ -5,6 +5,35 @@ chunked index, and multi-method search (keyword, fuzzy, semantic, hybrid).
 
 ---
 
+## Implementation docs
+
+Phase-level documents for coding agents are in [`docs/implementation/`](docs/implementation/):
+
+| Doc | Phase |
+|---|---|
+| [overview.md](docs/implementation/overview.md) | Cross-cutting invariants, dependencies, recommended order |
+| [phase_01_models.md](docs/implementation/phase_01_models.md) | Data models — `MarkdownInfo`, `MarkdownExtractionResult`, physics fields |
+| [phase_02_extraction.md](docs/implementation/phase_02_extraction.md) | PDF → Markdown extraction — `call_ai_with_pdf`, provider, orchestrator, CLI |
+| [phase_03_validation.md](docs/implementation/phase_03_validation.md) | Markdown validation — `validate_markdown()`, status rules |
+| [phase_04_search_fields.md](docs/implementation/phase_04_search_fields.md) | Search field augmentation (optional) |
+| [phase_05_migration.md](docs/implementation/phase_05_migration.md) | SQLite migration v3 — tables, `_clear_index_tables`, `delete_paper` |
+| [phase_06_chunking.md](docs/implementation/phase_06_chunking.md) | Chunking — file selection, source priority, `chunk_document()` |
+| [phase_07_rebuild_index.md](docs/implementation/phase_07_rebuild_index.md) | Rebuild search index — orchestrator, `ProgressEvent`, CLI |
+| [phase_08_normalize_aliases.md](docs/implementation/phase_08_normalize_aliases.md) | Normalization and aliases — `normalize.py`, `aliases.py`, bundled TOML |
+| [phase_09_embeddings.md](docs/implementation/phase_09_embeddings.md) | Embeddings — storage, incremental skip, `embed` CLI |
+| [phase_10_keyword_search.md](docs/implementation/phase_10_keyword_search.md) | Keyword search — FTS5 query builder, `keyword_search()` |
+| [phase_11_fuzzy_search.md](docs/implementation/phase_11_fuzzy_search.md) | Fuzzy search — RapidFuzz, `fuzzy_search()` |
+| [phase_12_semantic_search.md](docs/implementation/phase_12_semantic_search.md) | Semantic search — `semantic_search()`, stale-vector handling |
+| [phase_13_ranking.md](docs/implementation/phase_13_ranking.md) | Hybrid ranking — score formula, multi-concept bonus, why-matched |
+| [phase_14_search_cli.md](docs/implementation/phase_14_search_cli.md) | Search CLI — `service.py`, extended `search` command, JSON output |
+| [phase_15_config.md](docs/implementation/phase_15_config.md) | Config additions — `SearchConfig`, `ExtractionConfig`, validation |
+| [phase_16_tests.md](docs/implementation/phase_16_tests.md) | Tests — fixtures, full test file list, coverage checklist |
+
+This plan remains the authoritative spec. The phase docs extract and reformat the same
+requirements into self-contained prompts suitable for single-phase implementation.
+
+---
+
 ## Invariants
 
 - JSON records remain source of truth. All search artifacts are rebuildable.
