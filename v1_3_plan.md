@@ -35,7 +35,7 @@ src/paperlib/
     __init__.py
     models.py                    # SearchResult, Chunk, ScoreBreakdown dataclasses
     normalize.py                 # text/query normalization
-    aliases.py                   # domain alias expansion (reads config/search_aliases.toml)
+    aliases.py                   # domain alias expansion
     chunking.py                  # Markdown/txt → Chunk list with section/page metadata
     index.py                     # rebuild search database (orchestrator)
     fts.py                       # SQLite FTS5 keyword search
@@ -43,9 +43,9 @@ src/paperlib/
     embeddings.py                # embed text, store/load vectors from SQLite
     ranking.py                   # combine signals → ranked results
     service.py                   # high-level search(query, mode) → SearchResult[]
-
-config/
-  search_aliases.toml            # physics domain alias file (committed to repo)
+    data/
+      __init__.py
+      search_aliases.toml        # bundled default alias file; loaded via importlib.resources
 ```
 
 New runtime directory: none. New DB tables in existing `db/library.db`.
@@ -104,6 +104,14 @@ class MarkdownExtractor(Protocol):
         ...
 ```
 
+### Physics summary fields — add early
+
+Add `phenomena`, `quantities`, and `aliases` to `_default_summary()["physics"]` in
+[`models/record.py`](src/paperlib/models/record.py) **in this phase**, not in
+Phase 4. The `_merge_dict` function only passes through keys present in defaults,
+so these fields would be silently dropped on any read/write cycle until the
+defaults are updated. Three-line change; zero behavioral risk on existing records.
+
 `page_count` in `MarkdownExtractionResult`: the provider may return `None`.
 The orchestrator computes `page_count` locally from the PDF (e.g. via
 `pdfplumber`) and overwrites `result.page_count` before validation and
@@ -117,18 +125,24 @@ persistence. API-reported page counts must not be trusted.
 
 ### Phase 2A — Extend `ai/client.py` with PDF/file input
 
-`ai/client.py` currently wraps text-only chat completion. Before writing the
-extractor, add a provider-neutral method:
+`ai/client.py` is function-based (no client class). Add a new module-level
+function following the existing `call_ai` / `call_openai_compatible` pattern:
 
 ```python
-def extract_markdown_from_pdf(
-    self, pdf_path: Path, prompt: str, model: str
+def call_ai_with_pdf(
+    pdf_path: Path, prompt: str, ai_config
 ) -> str:  # raw Markdown string
 ```
 
 All provider-specific details (base64 encoding, multipart upload, file object
-API) live inside `ai/client.py`, not inside the extractor. `openai_pdf.py`
-calls this method and knows nothing about the wire format.
+API) live inside `call_ai_with_pdf`, not inside the extractor. `openai_pdf.py`
+calls `call_ai_with_pdf()` and knows nothing about the wire format.
+
+Providers that do not support PDF input must raise a clear `AIError`, for
+example: `"anthropic provider does not support PDF input; use openai or
+openai-compat"`. Only OpenAI and OpenAI-compatible providers are supported
+in v1.3. The Anthropic path raises immediately; the OpenRouter path raises with
+a note that PDF support depends on the underlying model.
 
 ### Phase 2B — Provider implementation
 
@@ -169,6 +183,7 @@ paperlib extract-markdown <id>          # single paper
 paperlib extract-markdown --all         # all papers missing validated markdown
 paperlib extract-markdown --failed      # retry previously failed extractions
 paperlib extract-markdown --force       # re-extract even if already exists
+paperlib extract-markdown --dry-run     # resolve candidates, skip AI calls and all writes
 ```
 
 A **failed** extraction writes `MarkdownInfo(status="failed", markdown_path=None,
@@ -256,7 +271,9 @@ unchanged.
 
 **Goal:** add chunk, FTS, and embedding tables to `db/library.db`.
 
-Migration registered in `store/migrations.py` as `MIGRATIONS[3]`.
+Add `_migrate_to_v3(conn)` called from `apply_migrations()` after
+`_migrate_to_v2(conn)`. Bump `SCHEMA_VERSION = 3`. Follow the existing
+`_migrate_to_vN` pattern — no registry, no dict.
 
 ### New tables
 
@@ -321,8 +338,11 @@ CREATE TABLE paper_embeddings (
 );
 
 -- Chunk-level embeddings
+-- No FK to chunks: --force rebuilds chunks (DELETE+INSERT) while preserving
+-- embeddings unless --embeddings is passed. Orphan cleanup is handled
+-- explicitly in index.py after each rebuild.
 CREATE TABLE chunk_embeddings (
-    chunk_id     TEXT PRIMARY KEY REFERENCES chunks(chunk_id),
+    chunk_id     TEXT PRIMARY KEY,
     paper_id     TEXT NOT NULL,
     model        TEXT NOT NULL,
     dimension    INTEGER NOT NULL,  -- vector length; detect shape mismatch on load
@@ -340,6 +360,23 @@ CREATE TABLE chunk_embeddings (
 metadata.
 
 `search/chunking.py` — `chunk_document(record, config) -> list[Chunk]`
+
+### File selection (multi-file records)
+
+`PaperRecord.files` may contain more than one `FileRecord`. Select the single
+file to chunk as follows:
+
+1. If `summary.source_file_hash` is set and a `FileRecord` with that hash
+   exists and has `extraction.status == "ok"`, use that file.
+2. Otherwise, sort candidates by:
+   - extraction status: `"ok"` > `"partial"` > others
+   - then extraction quality: `"good"` > `"low_text"` > `"scanned"` >
+     `"equation_heavy"` > `"unknown"`
+   - then `word_count` descending
+   Use the first result.
+
+Only one file is chunked per paper. The selected `file_hash` is recorded on
+all generated `Chunk` objects (already in the schema).
 
 ### Source priority
 
@@ -383,6 +420,7 @@ recomputed on the next `embed` or `rebuild-search-index --embeddings` run.
 paperlib rebuild-search-index               # chunks + FTS only
 paperlib rebuild-search-index --embeddings  # + embeddings
 paperlib rebuild-search-index --force       # clear and rebuild all
+paperlib rebuild-search-index --dry-run     # compute chunk counts, skip all DB writes
 ```
 
 **`--force` semantics:** clears and rebuilds `chunks`, `paper_fts`, and
@@ -418,7 +456,10 @@ and FTS first; `paperlib embed` skips chunk/FTS and updates embeddings only.
 Running both is safe but redundant — use `rebuild-search-index --embeddings`
 when rebuilding from scratch, `paperlib embed` for incremental updates.
 
-Progress reported as plain `print` lines. No external progress bar dep.
+Library functions (`index.py`, `embeddings.py`) yield `ProgressEvent` objects
+(a simple dataclass: `message: str`, `count: int | None`). CLI commands collect
+and format them via `click.echo`. User-facing wording lives only in `cli.py`.
+No external progress bar dep.
 
 ---
 
@@ -506,6 +547,7 @@ Skip embed if `source_hash` (sha256 of source text) matches stored value.
 paperlib embed                   # embed all missing
 paperlib embed --force           # re-embed all
 paperlib embed --backend local   # override config
+paperlib embed --dry-run         # report missing/stale counts, skip model load and DB writes
 ```
 
 `paperlib embed` requires chunks to exist in the database. If the `chunks`
@@ -627,7 +669,16 @@ paperlib search "query" --mode semantic
 paperlib search "query" --mode hybrid
 paperlib search "query" --top 10
 paperlib search "query" --json
+paperlib search "query" --field title    # optional: restrict FTS/fuzzy to one field
+paperlib search "query" --sort year      # optional: re-sort results (default: by score)
 ```
+
+**Backward compatibility:** The existing `--field title|authors|summary|all`
+flag is retained as an optional filter layered on top of `--mode`, not as a
+replacement for it. `--sort` is kept but results default to relevance/score
+ordering; `--sort` is only applied when explicitly passed. No deprecation
+warnings — the interface change is additive. Tests and docs referencing `--field`
+or `--sort` are updated to reflect this layered behaviour.
 
 ### Terminal output (default)
 
@@ -702,7 +753,7 @@ engine            = "pdfplumber"
 markdown_backend  = "none"        # "openai_pdf" | "none"; default "none" only to
                                   # avoid accidental API cost. Preferred v1.3 path
                                   # is "openai_pdf". Set explicitly to enable.
-markdown_model    = "gpt-5.4"     # OpenAI model with PDF/file input support
+markdown_model    = "openai:gpt-5.4"  # provider prefix required; unprefixed names route to Anthropic
 markdown_require_validation    = true
 markdown_fallback_to_txt       = true
 markdown_fallback_partial      = false   # use "partial" validated markdown
@@ -710,7 +761,7 @@ markdown_fallback_partial      = false   # use "partial" validated markdown
 [search]
 embedding_backend  = "local"
 embedding_model    = "sentence-transformers/all-MiniLM-L6-v2"
-alias_file         = ""                  # blank → uses config/search_aliases.toml
+alias_file         = ""                  # blank → uses bundled src/paperlib/search/data/search_aliases.toml
 default_mode       = "hybrid"            # "keyword" | "fuzzy" | "semantic" | "hybrid"
 top_n              = 10
 ```
@@ -770,7 +821,14 @@ dependencies = [
 
 [project.optional-dependencies]
 search = ["sentence-transformers"]
+
+[tool.setuptools.package-data]
+"paperlib.search.data" = ["*.toml"]
 ```
+
+The `search/data/` directory must contain an `__init__.py` so setuptools
+recognises it as a package. The alias file is loaded at runtime via
+`importlib.resources.files("paperlib.search.data").joinpath("search_aliases.toml")`.
 
 Install:
 - Core (keyword + fuzzy): no extra step — `rapidfuzz` and `numpy` are bundled.
@@ -808,10 +866,12 @@ paperlib search "ferromagnetic hybrid resonator"
 ## Definition of done (v1.3)
 
 **Extraction**
-- [ ] `ai/client.py` extended with `extract_markdown_from_pdf()` (Phase 2A)
+- [ ] `ai/client.py` extended with module-level `call_ai_with_pdf(pdf_path, prompt, ai_config)` (Phase 2A)
+- [ ] `call_ai_with_pdf` raises actionable `AIError` for Anthropic/unsupported providers
 - [ ] `MarkdownExtractionResult` and `MarkdownInfo` dataclasses implemented
+- [ ] `_default_summary()["physics"]` includes `phenomena`, `quantities`, `aliases` (Phase 1)
 - [ ] `MarkdownExtractor` Protocol defined; `openai_pdf` provider implemented
-      via `extract_markdown_from_pdf()` — no wire-format details in the extractor
+      via `call_ai_with_pdf()` — no wire-format details in the extractor
 - [ ] Orchestrator computes `page_count` locally from PDF; overwrites
       provider-returned value before validation
 - [ ] `paperlib extract-markdown` produces validated `.md` files at
@@ -823,10 +883,15 @@ paperlib search "ferromagnetic hybrid resonator"
       into `FileRecord` and persists to JSON
 - [ ] `extract-markdown --failed` selects records where
       `file_record.markdown.status == "failed"`
+- [ ] `extract-markdown --dry-run` resolves candidates, skips AI calls and all writes
 - [ ] Re-running `extract-markdown` is idempotent unless `--force` is used
 
 **Indexing**
+- [ ] Migration follows `_migrate_to_v3(conn)` pattern; `SCHEMA_VERSION = 3`
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
+- [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
+- [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup is explicit in `index.py`
+- [ ] Chunker selects file via `summary.source_file_hash` first, then status/quality/word_count
 - [ ] Chunk table replacement and `chunk_fts` rebuild happen in one transaction
 - [ ] Chunk IDs are deterministic: same source text + config → same `chunk_id`
 - [ ] `chunks` table stores `source_type` and `location_confidence`
@@ -839,6 +904,7 @@ paperlib search "ferromagnetic hybrid resonator"
 **Embeddings**
 - [ ] `paperlib embed` exits with actionable message if `chunks` table is empty
 - [ ] Missing `sentence-transformers` produces install instruction and exits
+- [ ] `embed --dry-run` reports missing/stale counts, skips model load and DB writes
 - [ ] `paperlib embed` stores float32 embeddings (dim=384) in SQLite with `source_hash` and
       `dimension`
 - [ ] Semantic search skips embeddings whose `source_hash` does not match
@@ -851,6 +917,8 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `paperlib search "query" --json` produces stable JSON with `source_type`,
       `location_confidence`, `page_start`, `page_end`, `snippet`, score breakdown
 - [ ] Alias expansion shown in terminal output and `--json`
+- [ ] `--field` retained as optional filter layered on top of `--mode`; no deprecation warning
+- [ ] `--sort` retained; default ordering is relevance/score (not year)
 - [ ] Keyword search works without embeddings (graceful fallback)
 - [ ] Hybrid search works with `.txt` fallback when no Markdown exists, marking
       chunks as `location_confidence = "low"`
@@ -860,7 +928,10 @@ paperlib search "ferromagnetic hybrid resonator"
 
 **Quality**
 - [ ] `rebuild-search-index` is idempotent
+- [ ] Library functions yield `ProgressEvent` objects; all `click.echo` calls live in `cli.py`
+- [ ] `search/data/search_aliases.toml` loaded via `importlib.resources`; `alias_file` config key overrides
+- [ ] `[tool.setuptools.package-data]` includes `paperlib.search.data = ["*.toml"]`
 - [ ] All new code covered by tests (including degraded-mode and stale-embedding
       scenarios)
-- [ ] `config.example.toml` updated with all new keys
+- [ ] `config.example.toml` updated with all new keys (including `openai:` prefix on `markdown_model`)
 - [ ] CHANGELOG entry written
