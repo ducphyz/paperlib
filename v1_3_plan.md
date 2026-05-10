@@ -100,7 +100,7 @@ class MarkdownInfo:
 
 ```python
 class MarkdownExtractor(Protocol):
-    def extract(self, pdf_path: Path, config: Config) -> MarkdownExtractionResult:
+    def extract(self, pdf_path: Path, config: AppConfig) -> MarkdownExtractionResult:
         ...
 ```
 
@@ -498,9 +498,17 @@ embeddings whose `source_hash` still matches are preserved; orphaned
    This requires that `chunks.id` (the `content_rowid`) is always in sync.
 5. Populate `paper_fts` by reading JSON record fields directly (title, authors,
    tags, summary, physics structured fields) — not from the `papers` SQL table.
+5b. **Always** delete orphaned `chunk_embeddings` — rows whose `chunk_id` no
+   longer exists in `chunks`. This runs unconditionally after step 5, regardless
+   of whether `--embeddings` is passed. The SQL is cheap and prevents stale
+   vectors from accumulating across rebuilds:
+   ```sql
+   DELETE FROM chunk_embeddings
+   WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks);
+   ```
+   Emit `ProgressKind.ORPHAN_CLEANED` with the count of rows deleted.
 6. If `--embeddings`: call the same embedding logic used by `paperlib embed`
-   for each paper and chunk that lacks a current embedding. Delete orphaned
-   `chunk_embeddings` for chunk_ids no longer in `chunks`.
+   for each paper and chunk that lacks a current embedding.
 
 `paperlib rebuild-search-index --embeddings` and `paperlib embed` use the same
 underlying code. The difference: `rebuild-search-index` always rebuilds chunks
@@ -752,12 +760,46 @@ paperlib search "query" --field title    # optional: restrict FTS/fuzzy to one f
 paperlib search "query" --sort year      # optional: re-sort results (default: by score)
 ```
 
+### Empty index guard
+
+If `paper_fts` is empty when `paperlib search` is called (i.e. schema v3
+exists but `rebuild-search-index` has never run), the command must exit with a
+clear actionable message and non-zero status rather than silently returning
+zero results:
+
+```
+Error: search index not built. Run `paperlib rebuild-search-index` first.
+```
+
+Do **not** fall back to the legacy LIKE search — the result set would be
+qualitatively different from FTS/hybrid results and would confuse users who
+just upgraded. Detect by `SELECT COUNT(*) FROM paper_fts` before executing any
+query.
+
 **Backward compatibility:** The existing `--field title|authors|summary|all`
 flag is retained as an optional filter layered on top of `--mode`, not as a
 replacement for it. `--sort` is kept but results default to relevance/score
 ordering; `--sort` is only applied when explicitly passed. No deprecation
 warnings — the interface change is additive. Tests and docs referencing `--field`
 or `--sort` are updated to reflect this layered behaviour.
+
+### `--field` mapping
+
+`--field` restricts FTS column filtering and fuzzy field targeting. Semantic
+search **always ignores `--field`** and operates over full embeddings — passing
+`--field title --mode semantic` is accepted without error but `--field` has no
+effect on the semantic component. This behaviour must be documented in `--help`.
+
+| `--field` | `paper_fts` columns queried | Fuzzy fields | Chunk FTS |
+|---|---|---|---|
+| `title` | `title` only | title only | disabled |
+| `authors` | `authors` only | authors only | disabled |
+| `summary` | `summary_short`, `summary_technical` | none | enabled |
+| `all` | all columns (default) | all fields | enabled |
+
+`--field summary` in v1.3 uses FTS5 on `summary_short`/`summary_technical`
+columns — the current JSON scan implementation is replaced. The CLI interface
+is unchanged.
 
 ### Terminal output (default)
 
@@ -845,6 +887,50 @@ default_mode       = "hybrid"            # "keyword" | "fuzzy" | "semantic" | "h
 top_n              = 10
 ```
 
+### Python dataclass changes (`config.py`)
+
+Extend `ExtractionConfig` with the new fields and add `SearchConfig`. Update
+`AppConfig` to include `search`. Update `load_config` to read both sections.
+
+```python
+@dataclass
+class ExtractionConfig:           # extends existing
+    engine: str
+    min_char_count: int
+    min_word_count: int
+    markdown_backend: str         # "openai_pdf" | "none"; default "none"
+    markdown_model: str           # e.g. "openai:gpt-5.4"; provider prefix required
+    markdown_require_validation: bool    # default True
+    markdown_fallback_to_txt: bool       # default True
+    markdown_fallback_partial: bool      # default False
+
+
+@dataclass
+class SearchConfig:               # new
+    embedding_backend: str        # "local"; default "local"
+    embedding_model: str          # default "sentence-transformers/all-MiniLM-L6-v2"
+    alias_file: str               # "" = use bundled; non-empty = user path override
+    default_mode: str             # "hybrid"; "keyword"|"fuzzy"|"semantic"|"hybrid"
+    top_n: int                    # default 10
+
+
+@dataclass
+class AppConfig:                  # add search field
+    library: LibraryConfig
+    paths: PathsConfig
+    pipeline: PipelineConfig
+    extraction: ExtractionConfig
+    ai: AIConfig
+    lookup: LookupConfig
+    search: SearchConfig          # new
+```
+
+`load_config` reads `_section(data, "search")` and constructs `SearchConfig`
+with the defaults shown above. `markdown_model` is validated at config load
+time via `split_model_string(markdown_model)` — same pattern as `ai.model` in
+`_load_ai_config` — so a misconfigured prefix fails immediately on startup
+rather than at extraction time.
+
 ---
 
 ## Phase 16 — Tests
@@ -880,7 +966,13 @@ so chunking tests are deterministic.
   (not stale) after rebuild-index clears and repopulates base tables
 - `test_search_json.py` — JSON schema validation against known fixture query
 - `test_search_degraded.py` — hybrid search with no embeddings emits warning
-  line and returns keyword + fuzzy results; semantic mode exits non-zero
+  line and returns keyword + fuzzy results; semantic mode exits non-zero;
+  `paperlib search` before `rebuild-search-index` (empty `paper_fts`) exits
+  non-zero with "search index not built" message and does not fall back to LIKE
+- `test_config.py` — `SearchConfig` loaded with correct defaults; extended
+  `ExtractionConfig` fields parsed correctly; `markdown_model` with missing
+  provider prefix raises `ConfigError` at load time; `search.alias_file`
+  override accepted; `AppConfig.search` present on loaded config
 - `test_ai_client.py` — `call_ai_with_pdf` calls `split_model_string(model)`
   internally; `markdown_model = "openai:gpt-5.4"` routes to OpenAI backend;
   Anthropic provider string raises `AIError` immediately
@@ -946,7 +1038,9 @@ After upgrading to v1.3:
 3. `paperlib rebuild-search-index` — builds chunks and FTS tables. Fast; no
    embeddings. Keyword and fuzzy search are usable after this step.
 4. Optional: `paperlib embed` — computes embeddings (downloads model on first
-   run for local backend). Required for semantic and hybrid search.
+   run for local backend). Required for semantic mode. Hybrid search degrades
+   gracefully without embeddings — the semantic component is skipped and a
+   warning is printed; keyword and fuzzy results are still returned.
 
 Recommended workflow after upgrade:
 ```
@@ -964,7 +1058,7 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `call_ai_with_pdf` raises actionable `AIError` for Anthropic/unsupported providers
 - [ ] `MarkdownExtractionResult` and `MarkdownInfo` dataclasses implemented
 - [ ] `_default_summary()["physics"]` includes `phenomena`, `quantities`, `aliases` (Phase 1)
-- [ ] `MarkdownExtractor` Protocol defined; `openai_pdf` provider implemented
+- [ ] `MarkdownExtractor` Protocol defined with `config: AppConfig`; `openai_pdf` provider implemented
       via `call_ai_with_pdf()` — no wire-format details in the extractor
 - [ ] Orchestrator computes `page_count` locally from PDF; overwrites
       provider-returned value before validation
@@ -985,7 +1079,7 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and consistent
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
 - [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
-- [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup is explicit in `index.py`
+- [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup runs unconditionally after chunk rebuild (step 5b), not gated on `--embeddings`
 - [ ] Chunker selects file via `summary.source_file_hash` first, then status/quality/word_count
 - [ ] Chunk table replacement and `chunk_fts` rebuild happen in one transaction
 - [ ] Chunk IDs are deterministic: same source text + config → same `chunk_id`
@@ -1012,7 +1106,8 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `paperlib search "query" --json` produces stable JSON with `source_type`,
       `location_confidence`, `page_start`, `page_end`, `snippet`, score breakdown
 - [ ] Alias expansion shown in terminal output and `--json`
-- [ ] `--field` retained as optional filter layered on top of `--mode`; no deprecation warning
+- [ ] `paperlib search` detects empty `paper_fts` and exits non-zero with "search index not built" message; no LIKE fallback
+- [ ] `--field` restricts FTS columns and fuzzy fields per mapping table; semantic search ignores `--field`; `--help` documents this
 - [ ] `--sort` retained; default ordering is relevance/score (not year)
 - [ ] Keyword search works without embeddings (graceful fallback)
 - [ ] Hybrid search works with `.txt` fallback when no Markdown exists, marking
@@ -1028,5 +1123,7 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `[tool.setuptools.package-data]` includes `paperlib.search.data = ["*.toml"]`
 - [ ] All new code covered by tests (including degraded-mode and stale-embedding
       scenarios)
+- [ ] `ExtractionConfig` extended with markdown fields; `SearchConfig` added; `AppConfig.search` wired in `load_config`
+- [ ] `markdown_model` validated via `split_model_string` at config load time (raises `ConfigError` on bad prefix)
 - [ ] `config.example.toml` updated with all new keys (including `openai:` prefix on `markdown_model`)
 - [ ] CHANGELOG entry written
