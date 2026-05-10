@@ -398,7 +398,10 @@ def _clear_index_tables(conn: sqlite3.Connection) -> None:
     # instead, after deleting chunks, run INSERT INTO chunk_fts(chunk_fts)
     # VALUES('rebuild') to produce an empty, internally consistent FTS index.
     # Both operations must run inside the same transaction as the table clears.
-    for table in ("paper_fts", "chunk_embeddings", "paper_embeddings", "chunks"):
+    # search_index_state cleared so `paperlib search` does not report the index
+    # as built after rebuild-index discards search artifacts.
+    for table in ("paper_fts", "chunk_embeddings", "paper_embeddings", "chunks",
+                  "search_index_state"):
         conn.execute(f"DELETE FROM {table}")
     conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
     # Base tables
@@ -488,22 +491,39 @@ paperlib rebuild-search-index --force       # clear and rebuild all
 paperlib rebuild-search-index --dry-run     # compute chunk counts, skip all DB writes
 ```
 
-**`--force` semantics:** clears and rebuilds `chunks`, `paper_fts`, and
-`chunk_fts`. Does **not** delete `paper_embeddings` or `chunk_embeddings`
-unless `--embeddings` is also passed. Without `--embeddings`, existing
-embeddings whose `source_hash` still matches are preserved; orphaned
-`chunk_embeddings` whose `chunk_id` no longer exists in `chunks` are deleted.
+**`--force` semantics:**
+
+| Flags | Chunks + FTS | Embeddings |
+|---|---|---|
+| _(none)_ | Fully rebuilt for all current papers | Preserved; orphans cleaned |
+| `--embeddings` | Fully rebuilt | Rebuilt for missing/stale; orphans cleaned |
+| `--force` | Fully rebuilt | Wiped entirely before rebuild; no re-embed |
+| `--force --embeddings` | Fully rebuilt | Wiped then fully re-embedded |
+
+Default (no `--force`) always replaces all chunks and FTS — there is no
+incremental skip in v1.3. `--force` adds only one thing: it deletes
+`paper_embeddings` and `chunk_embeddings` before the rebuild starts, giving a
+guaranteed clean slate. Without `--force`, existing embeddings whose
+`source_hash`, `model`, and `dimension` all match are preserved; orphaned rows
+are always cleaned unconditionally.
 
 `search/index.py` orchestrates:
 
 1. Collect `current_paper_ids` from the full JSON record set.
 2. Inside **one transaction** covering all papers:
-   a. Delete stale chunks for records no longer in JSON:
-      ```sql
-      DELETE FROM chunks WHERE paper_id NOT IN (current_paper_ids);
-      ```
+   a. Delete stale and all chunks depending on library state:
+      - If `current_paper_ids` is non-empty:
+        ```sql
+        DELETE FROM chunks WHERE paper_id NOT IN (current_paper_ids);
+        ```
+      - If `current_paper_ids` is empty (library has no records):
+        ```sql
+        DELETE FROM chunks;
+        ```
+      Both cases then proceed to the per-paper loop (which runs zero times for
+      an empty library), so the FTS rebuild produces a consistent empty index.
    b. For each paper: delete its existing chunks, then insert newly computed
-      chunks (same per-paper loop as before):
+      chunks:
       ```sql
       DELETE FROM chunks WHERE paper_id = ?;
       INSERT INTO chunks ...;
@@ -514,12 +534,16 @@ embeddings whose `source_hash` still matches are preserved; orphaned
       ```
       A single rebuild is correct and far cheaper than one rebuild per paper.
       This requires that `chunks.id` (the `content_rowid`) is always in sync.
-3. Populate `paper_fts`: first remove stale rows for deleted papers, then
-   reinsert for all current papers from JSON records directly (not from the
-   `papers` SQL table):
-   ```sql
-   DELETE FROM paper_fts WHERE paper_id NOT IN (current_paper_ids);
-   ```
+3. Populate `paper_fts`: remove stale rows, then reinsert for all current
+   papers from JSON records directly (not from the `papers` SQL table):
+   - If `current_paper_ids` is non-empty:
+     ```sql
+     DELETE FROM paper_fts WHERE paper_id NOT IN (current_paper_ids);
+     ```
+   - If `current_paper_ids` is empty:
+     ```sql
+     DELETE FROM paper_fts;
+     ```
 4. **Always** delete orphaned `chunk_embeddings` unconditionally after chunk
    rebuild — rows whose `chunk_id` no longer exists in `chunks`, or whose
    `paper_id` no longer exists in `papers` (covers deleted records even if
@@ -634,11 +658,12 @@ Similarity is dot product (equivalent to cosine when vectors are normalized).
 First run downloads the model from Hugging Face (~90 MB). After the cache
 exists, `embed` and `search` run fully offline.
 
-If `sentence-transformers` is not installed, exit with:
+If `sentence-transformers` is not installed (broken environment), exit with:
 ```
-Error: sentence-transformers is not installed. Install with:
-  pip install -e ".[search]"
+Error: sentence-transformers is not installed. Reinstall paperlib: pip install -e .
 ```
+Note: `sentence-transformers` is a required dep — there is no `[search]`
+optional extra. This error should not occur in a normal install.
 
 ### Paper embedding source text
 
@@ -1117,7 +1142,7 @@ paperlib search "ferromagnetic hybrid resonator"
 
 **Indexing**
 - [ ] Migration follows `_migrate_to_v3(conn)` pattern; `SCHEMA_VERSION = 3`
-- [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and consistent
+- [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, `search_index_state`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and `search_index_state` cleared
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
 - [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
 - [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup runs unconditionally (by chunk_id AND paper_id), not gated on `--embeddings`
@@ -1169,4 +1194,7 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `ExtractionConfig` extended with markdown fields; `SearchConfig` added; `AppConfig.search` wired in `load_config`
 - [ ] `markdown_model` validated at config load: prefix required; only `openai` or `openai-compat` accepted; `anthropic`, `openrouter`, unprefixed all raise `ConfigError`
 - [ ] `config.example.toml` updated with all new keys (including `openai:` prefix on `markdown_model`)
+- [ ] `docs/config.md` updated with all v1.3 config keys, defaults, and valid values
+- [ ] `docs/operations.md` updated with upgrade workflow and `rebuild-search-index` / `embed` commands
+- [ ] `docs/schema.md` updated with v3 SQLite tables and JSON shape changes (`MarkdownInfo` in `FileRecord`)
 - [ ] CHANGELOG entry written
