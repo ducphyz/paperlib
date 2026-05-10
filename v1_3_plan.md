@@ -130,9 +130,19 @@ function following the existing `call_ai` / `call_openai_compatible` pattern:
 
 ```python
 def call_ai_with_pdf(
-    pdf_path: Path, prompt: str, ai_config
+    pdf_path: Path, prompt: str, model: str, ai_config
 ) -> str:  # raw Markdown string
 ```
+
+`model` is an explicit parameter (not read from `ai_config`) because markdown
+extraction uses `config.extraction.markdown_model`, which is a different config
+key from the summarisation model at `config.ai.model`. `ai_config` carries only
+API key env, base URL, temperature, max_tokens, and timeout.
+
+Internally, `call_ai_with_pdf` calls `split_model_string(model)` to parse the
+provider prefix and route to the correct backend — identical to how `call_ai`
+routes. Provider validation (any provider other than `openai` or `openai-compat`
+→ raise `AIError`) lives inside `call_ai_with_pdf`, not in the extractor.
 
 All provider-specific details (base64 encoding, multipart upload, file object
 API) live inside `call_ai_with_pdf`, not inside the extractor. `openai_pdf.py`
@@ -147,7 +157,9 @@ a note that PDF support depends on the underlying model.
 ### Phase 2B — Provider implementation
 
 `pipeline/markdown_extractors/openai_pdf.py` — first and only implementation
-for v1.3. Calls `ai/client.py` via the method added in Phase 2A.
+for v1.3. Calls `call_ai_with_pdf(pdf_path, prompt, config.extraction.markdown_model, ai_config)`.
+It passes `config.extraction.markdown_model` explicitly as `model`; it never
+reads `ai_config.model` or `config.ai.model`.
 
 **Responsibility boundary:** providers **extract only**; they do not validate.
 The provider returns `MarkdownExtractionResult` with `validation_status =
@@ -354,6 +366,40 @@ CREATE TABLE chunk_embeddings (
 
 ---
 
+### Compatibility with `paperlib rebuild-index`
+
+The existing `rebuild-index` command calls `_clear_index_tables(conn)` in
+`store/db.py` before repopulating the base tables from JSON records. With v3,
+`chunks.paper_id` and `paper_embeddings.paper_id` have FK references to
+`papers`. Because `PRAGMA foreign_keys = ON` is always set in `connect()`,
+deleting from `papers` before `chunks` or `paper_embeddings` raises a
+constraint error.
+
+`_clear_index_tables` must be updated to clear v3 search artifacts first:
+
+```python
+def _clear_index_tables(conn: sqlite3.Connection) -> None:
+    # v3 search artifacts — cleared before base tables due to FK constraints.
+    # paper_fts is standalone FTS5: plain DELETE works.
+    # chunk_fts is external-content FTS5: do NOT DELETE FROM chunk_fts;
+    # instead, after deleting chunks, run INSERT INTO chunk_fts(chunk_fts)
+    # VALUES('rebuild') to produce an empty, internally consistent FTS index.
+    # Both operations must run inside the same transaction as the table clears.
+    for table in ("paper_fts", "chunk_embeddings", "paper_embeddings", "chunks"):
+        conn.execute(f"DELETE FROM {table}")
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+    # Base tables
+    for table in ("processing_runs", "aliases", "files", "papers"):
+        conn.execute(f"DELETE FROM {table}")
+```
+
+`paperlib rebuild-index` is allowed to discard search artifacts and embeddings
+— all SQLite content is rebuildable from JSON records and text/Markdown files.
+Embedding preservation semantics (`source_hash` matching) apply only to
+`rebuild-search-index`, not to `rebuild-index`.
+
+---
+
 ## Phase 6 — Chunking
 
 **Goal:** split full text into overlapping chunks carrying source quality
@@ -367,12 +413,18 @@ metadata.
 file to chunk as follows:
 
 1. If `summary.source_file_hash` is set and a `FileRecord` with that hash
-   exists and has `extraction.status == "ok"`, use that file.
+   exists and has `extraction.status == "ok"` **and `word_count > 0`**, use
+   that file. The `word_count > 0` guard prevents selecting a designated source
+   file that is effectively empty (e.g. a scanned PDF that was never OCR'd).
 2. Otherwise, sort candidates by:
-   - extraction status: `"ok"` > `"partial"` > others
-   - then extraction quality: `"good"` > `"low_text"` > `"scanned"` >
-     `"equation_heavy"` > `"unknown"`
-   - then `word_count` descending
+   - extraction status: `"ok"` > `"partial"` > `"failed"` / `"pending"`
+   - then `word_count` descending. Files with `word_count = 0` sort below any
+     file with words, regardless of quality label.
+   - then extraction quality: `"good"` > `"equation_heavy"` > `"low_text"` >
+     `"unknown"` > `"scanned"`. `scanned` is last because scanned PDFs
+     commonly produce zero or near-zero extractable text even when `word_count`
+     is non-zero; `equation_heavy` is above `low_text` because it has usable
+     prose around the equations.
    Use the first result.
 
 Only one file is chunked per paper. The selected `file_hash` is recorded on
@@ -456,10 +508,35 @@ and FTS first; `paperlib embed` skips chunk/FTS and updates embeddings only.
 Running both is safe but redundant — use `rebuild-search-index --embeddings`
 when rebuilding from scratch, `paperlib embed` for incremental updates.
 
-Library functions (`index.py`, `embeddings.py`) yield `ProgressEvent` objects
-(a simple dataclass: `message: str`, `count: int | None`). CLI commands collect
-and format them via `click.echo`. User-facing wording lives only in `cli.py`.
-No external progress bar dep.
+Library functions (`index.py`, `embeddings.py`) yield structured `ProgressEvent`
+objects. CLI commands consume these and format them via `click.echo`. All
+user-facing wording lives only in `cli.py` — library code never calls `print`
+or `click.echo`. No external progress bar dep.
+
+```python
+from enum import StrEnum
+from dataclasses import dataclass
+
+class ProgressKind(StrEnum):
+    PAPER_START       = "paper_start"       # beginning to process a paper
+    PAPER_DONE        = "paper_done"        # paper processing complete
+    CHUNKS_WRITTEN    = "chunks_written"    # chunk batch written for one paper
+    FTS_REBUILT       = "fts_rebuilt"       # FTS tables rebuilt
+    EMBED_START       = "embed_start"       # beginning paper-level embedding
+    EMBED_DONE        = "embed_done"        # paper-level embedding stored
+    CHUNK_EMBED_START = "chunk_embed_start" # beginning chunk-level embedding
+    CHUNK_EMBED_DONE  = "chunk_embed_done"  # chunk-level embedding stored
+    ORPHAN_CLEANED    = "orphan_cleaned"    # orphaned chunk_embeddings removed
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    kind:      ProgressKind
+    paper_id:  str | None = None
+    handle_id: str | None = None
+    count:     int | None = None
+    total:     int | None = None
+    status:    str | None = None
+```
 
 ---
 
@@ -478,8 +555,10 @@ abbreviations, and physics-domain synonyms.
 
 ### `search/aliases.py`
 
-Reads `config/search_aliases.toml`. Maps abbreviation or variant → list of
-canonical forms. Applied to queries at search time — not stored in the index.
+Loads bundled aliases from `paperlib.search.data/search_aliases.toml` via
+`importlib.resources`. `search.alias_file` config key may override this with a
+user-provided TOML file. Maps abbreviation or variant → list of canonical forms.
+Applied to queries at search time — not stored in the index.
 
 ```toml
 [aliases]
@@ -784,16 +863,31 @@ so chunking tests are deterministic.
 - `test_validate_markdown.py` — all validation checks, refusal detection,
   monotonic markers, partial vs. failed classification
 - `test_chunking.py` — chunk count, section headers, page markers,
-  `source_type` / `location_confidence` for Markdown vs. txt source
+  `source_type` / `location_confidence` for Markdown vs. txt source;
+  file-selection: equation-heavy file with words beats scanned/empty file;
+  file-selection: `source_file_hash` target with `word_count = 0` falls through
+  to fallback sort
 - `test_normalize.py` — hyphen variants, alias expansion, round-trip
+- `test_aliases.py` — bundled aliases load via `importlib.resources`; `search.alias_file`
+  override loads from user-provided TOML file instead
 - `test_fts.py` — exact title match, author match, chunk hit, no-result case
 - `test_fuzzy.py` — typo cases (resnator, feromagnetic, bogolubov)
 - `test_semantic.py` — mock embeddings (cosine sim math only, no model load)
 - `test_ranking.py` — weight formula, multi-concept bonus, score cap
-- `test_index_rebuild.py` — idempotency (run twice, same chunk and FTS state)
+- `test_index_rebuild.py` — idempotency (run twice, same chunk and FTS state);
+  regression: `paperlib rebuild-index` succeeds when v3 search tables and
+  embeddings already exist; asserts `chunk_fts` is empty and consistent
+  (not stale) after rebuild-index clears and repopulates base tables
 - `test_search_json.py` — JSON schema validation against known fixture query
 - `test_search_degraded.py` — hybrid search with no embeddings emits warning
   line and returns keyword + fuzzy results; semantic mode exits non-zero
+- `test_ai_client.py` — `call_ai_with_pdf` calls `split_model_string(model)`
+  internally; `markdown_model = "openai:gpt-5.4"` routes to OpenAI backend;
+  Anthropic provider string raises `AIError` immediately
+- `test_progress_events.py` — `index.py`, `embeddings.py` yield only
+  `ProgressEvent` objects (never call `print` or `click.echo`); `kind` values
+  are members of `ProgressKind`; `EMBED_START`/`EMBED_DONE` and
+  `CHUNK_EMBED_START`/`CHUNK_EMBED_DONE` are distinct and correctly emitted
 
 ---
 
@@ -866,7 +960,7 @@ paperlib search "ferromagnetic hybrid resonator"
 ## Definition of done (v1.3)
 
 **Extraction**
-- [ ] `ai/client.py` extended with module-level `call_ai_with_pdf(pdf_path, prompt, ai_config)` (Phase 2A)
+- [ ] `ai/client.py` extended with module-level `call_ai_with_pdf(pdf_path, prompt, model, ai_config)` (Phase 2A); calls `split_model_string(model)` internally; `openai_pdf.py` passes `config.extraction.markdown_model` as `model`
 - [ ] `call_ai_with_pdf` raises actionable `AIError` for Anthropic/unsupported providers
 - [ ] `MarkdownExtractionResult` and `MarkdownInfo` dataclasses implemented
 - [ ] `_default_summary()["physics"]` includes `phenomena`, `quantities`, `aliases` (Phase 1)
@@ -888,6 +982,7 @@ paperlib search "ferromagnetic hybrid resonator"
 
 **Indexing**
 - [ ] Migration follows `_migrate_to_v3(conn)` pattern; `SCHEMA_VERSION = 3`
+- [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and consistent
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
 - [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
 - [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup is explicit in `index.py`
@@ -928,7 +1023,7 @@ paperlib search "ferromagnetic hybrid resonator"
 
 **Quality**
 - [ ] `rebuild-search-index` is idempotent
-- [ ] Library functions yield `ProgressEvent` objects; all `click.echo` calls live in `cli.py`
+- [ ] Library functions yield structured `ProgressEvent(kind=ProgressKind.*, ...)` objects; `kind` is always a `ProgressKind` member; all `click.echo` calls live in `cli.py`; no `print` in library code
 - [ ] `search/data/search_aliases.toml` loaded via `importlib.resources`; `alias_file` config key overrides
 - [ ] `[tool.setuptools.package-data]` includes `paperlib.search.data = ["*.toml"]`
 - [ ] All new code covered by tests (including degraded-mode and stale-embedding
