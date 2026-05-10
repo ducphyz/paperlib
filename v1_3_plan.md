@@ -414,6 +414,52 @@ def _clear_index_tables(conn: sqlite3.Connection) -> None:
 Embedding preservation semantics (`source_hash` matching) apply only to
 `rebuild-search-index`, not to `rebuild-index`.
 
+### `delete_paper` update required
+
+`db.py:delete_paper()` currently deletes in the order `processing_runs →
+aliases → files → papers`. With v3 FKs (`chunks.paper_id → papers`,
+`paper_embeddings.paper_id → papers`) and `PRAGMA foreign_keys = ON`,
+deleting from `papers` while child rows exist raises a constraint error.
+
+Update `delete_paper` to clear v3 search artifacts for the paper before
+deleting the base row:
+
+```python
+def delete_paper(conn: sqlite3.Connection, paper_id: str) -> None:
+    try:
+        conn.execute("BEGIN")
+        # v3 search artifacts (FK children of papers)
+        conn.execute(
+            "DELETE FROM chunk_embeddings WHERE paper_id = ?", (paper_id,)
+        )
+        conn.execute(
+            "DELETE FROM paper_embeddings WHERE paper_id = ?", (paper_id,)
+        )
+        conn.execute(
+            "DELETE FROM chunks WHERE paper_id = ?", (paper_id,)
+        )
+        conn.execute(
+            "DELETE FROM paper_fts WHERE paper_id = ?", (paper_id,)
+        )
+        # Base tables
+        conn.execute(
+            "DELETE FROM processing_runs WHERE paper_id = ?", (paper_id,)
+        )
+        conn.execute("DELETE FROM aliases WHERE paper_id = ?", (paper_id,))
+        conn.execute("DELETE FROM files WHERE paper_id = ?", (paper_id,))
+        conn.execute("DELETE FROM papers WHERE paper_id = ?", (paper_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+```
+
+`chunk_fts` is an external-content FTS5 table driven by `chunks`; deleting
+from `chunks` automatically orphans the FTS entries, and the next
+`INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` cleans them up.
+`search_index_state` is not per-paper, so it is left untouched by
+`delete_paper`.
+
 ---
 
 ## Phase 6 — Chunking
@@ -1143,6 +1189,7 @@ paperlib search "ferromagnetic hybrid resonator"
 **Indexing**
 - [ ] Migration follows `_migrate_to_v3(conn)` pattern; `SCHEMA_VERSION = 3`
 - [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, `search_index_state`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and `search_index_state` cleared
+- [ ] `delete_paper` updated: clears `chunk_embeddings`, `paper_embeddings`, `chunks`, `paper_fts` for the paper before deleting from `papers` — satisfies v3 FK constraints with `PRAGMA foreign_keys = ON`
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
 - [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
 - [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup runs unconditionally (by chunk_id AND paper_id), not gated on `--embeddings`
