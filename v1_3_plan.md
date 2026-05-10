@@ -150,9 +150,11 @@ calls `call_ai_with_pdf()` and knows nothing about the wire format.
 
 Providers that do not support PDF input must raise a clear `AIError`, for
 example: `"anthropic provider does not support PDF input; use openai or
-openai-compat"`. Only OpenAI and OpenAI-compatible providers are supported
-in v1.3. The Anthropic path raises immediately; the OpenRouter path raises with
-a note that PDF support depends on the underlying model.
+openai-compat"`. Only `openai` and `openai-compat` are accepted in v1.3.
+`anthropic` raises immediately. `openrouter` is also rejected — if OpenRouter
+is needed for PDF extraction, configure it as `openai-compat` with
+`base_url = "https://openrouter.ai/api/v1"` and use a model that supports
+file input; this makes the model-dependent behaviour explicit to the user.
 
 ### Phase 2B — Provider implementation
 
@@ -362,6 +364,17 @@ CREATE TABLE chunk_embeddings (
     source_hash  TEXT NOT NULL,     -- sha256 of chunk text; skip re-embed if unchanged
     created_at   TEXT NOT NULL
 );
+
+-- Search index build state. At most one row (id = 1 enforced by CHECK).
+-- Populated by rebuild-search-index; used by `paperlib search` to detect
+-- an unbuilt index without relying on paper_fts row count (which is 0 for a
+-- legitimately empty library after a successful rebuild).
+CREATE TABLE search_index_state (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    built_at      TEXT NOT NULL,
+    record_count  INTEGER NOT NULL,
+    chunk_count   INTEGER NOT NULL
+);
 ```
 
 ---
@@ -483,30 +496,42 @@ embeddings whose `source_hash` still matches are preserved; orphaned
 
 `search/index.py` orchestrates:
 
-1. For each paper in records, determine full-text source (Phase 6 priority).
-2. Chunk and write/update `chunks` table.
-3. Repopulate `paper_fts`: delete all rows, then reinsert from JSON records.
-4. Repopulate `chunk_fts` using the FTS5 rebuild command after replacing chunk
-   rows. The chunk table replacement and FTS rebuild must happen inside a single
-   transaction to prevent a partially-updated search index:
+1. Collect `current_paper_ids` from the full JSON record set.
+2. Inside **one transaction** covering all papers:
+   a. Delete stale chunks for records no longer in JSON:
+      ```sql
+      DELETE FROM chunks WHERE paper_id NOT IN (current_paper_ids);
+      ```
+   b. For each paper: delete its existing chunks, then insert newly computed
+      chunks (same per-paper loop as before):
+      ```sql
+      DELETE FROM chunks WHERE paper_id = ?;
+      INSERT INTO chunks ...;
+      ```
+   c. Rebuild `chunk_fts` **once** after all chunk inserts are complete:
+      ```sql
+      INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild');
+      ```
+      A single rebuild is correct and far cheaper than one rebuild per paper.
+      This requires that `chunks.id` (the `content_rowid`) is always in sync.
+3. Populate `paper_fts`: first remove stale rows for deleted papers, then
+   reinsert for all current papers from JSON records directly (not from the
+   `papers` SQL table):
    ```sql
-   -- inside one transaction
-   DELETE FROM chunks WHERE paper_id = ?;
-   INSERT INTO chunks ...;
-   INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild');
+   DELETE FROM paper_fts WHERE paper_id NOT IN (current_paper_ids);
    ```
-   This requires that `chunks.id` (the `content_rowid`) is always in sync.
-5. Populate `paper_fts` by reading JSON record fields directly (title, authors,
-   tags, summary, physics structured fields) — not from the `papers` SQL table.
-5b. **Always** delete orphaned `chunk_embeddings` — rows whose `chunk_id` no
-   longer exists in `chunks`. This runs unconditionally after step 5, regardless
-   of whether `--embeddings` is passed. The SQL is cheap and prevents stale
-   vectors from accumulating across rebuilds:
+4. **Always** delete orphaned `chunk_embeddings` unconditionally after chunk
+   rebuild — rows whose `chunk_id` no longer exists in `chunks`, or whose
+   `paper_id` no longer exists in `papers` (covers deleted records even if
+   their chunk rows were already gone):
    ```sql
    DELETE FROM chunk_embeddings
-   WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks);
+   WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)
+      OR paper_id NOT IN (SELECT paper_id FROM papers);
    ```
    Emit `ProgressKind.ORPHAN_CLEANED` with the count of rows deleted.
+5. Upsert `search_index_state` (id=1) with `built_at`, `record_count` (len of
+   current JSON set), and `chunk_count` (total rows in `chunks`).
 6. If `--embeddings`: call the same embedding logic used by `paperlib embed`
    for each paper and chunk that lacks a current embedding.
 
@@ -626,7 +651,11 @@ materials | devices | phenomena | quantities | aliases | methods`
 
 ### Incremental update
 
-Skip embed if `source_hash` (sha256 of source text) matches stored value.
+Skip embed if **all three** of `source_hash` (sha256 of source text), `model`,
+and `dimension` match the stored values. A change in any one triggers
+re-embedding. This ensures that switching embedding models or any model that
+produces a different vector dimension always invalidates stored vectors —
+reusing vectors from a different model would silently corrupt similarity scores.
 
 ### CLI
 
@@ -681,13 +710,15 @@ Error: no chunks found. Run `paperlib rebuild-search-index` first.
 
 1. Normalize + expand query.
 2. Embed expanded query text.
-3. Load `paper_embeddings`, skipping any row whose `source_hash` does not
-   match the current source text hash for that paper. Stale vectors must not
-   be used — they survive rebuilds where chunks changed but `--embeddings` was
-   not passed.
+3. Load `paper_embeddings`, skipping any row where `source_hash`, `model`, or
+   `dimension` does not match the current values. All three must match; a model
+   or dimension mismatch means the vector is incompatible even if the source
+   text is unchanged. Stale vectors must not be used — they survive rebuilds
+   where chunks changed but `--embeddings` was not passed.
 4. Cosine similarity vs. loaded paper vectors → top-K paper scores.
-5. Load `chunk_embeddings`, skipping any row whose `source_hash` does not
-   match the current `chunks.text_hash`.
+5. Load `chunk_embeddings`, skipping any row where `source_hash`, `model`, or
+   `dimension` does not match the current `chunks.text_hash` and configured
+   embedding model/dimension.
 6. Cosine similarity vs. loaded chunk vectors → top-3 chunks per paper.
 7. Return `SemanticHit(paper_id, paper_score, chunk_hits)`.
 
@@ -762,10 +793,9 @@ paperlib search "query" --sort year      # optional: re-sort results (default: b
 
 ### Empty index guard
 
-If `paper_fts` is empty when `paperlib search` is called (i.e. schema v3
-exists but `rebuild-search-index` has never run), the command must exit with a
-clear actionable message and non-zero status rather than silently returning
-zero results:
+If `rebuild-search-index` has never run when `paperlib search` is called, the
+command must exit with a clear actionable message and non-zero status rather
+than silently returning zero results:
 
 ```
 Error: search index not built. Run `paperlib rebuild-search-index` first.
@@ -773,8 +803,11 @@ Error: search index not built. Run `paperlib rebuild-search-index` first.
 
 Do **not** fall back to the legacy LIKE search — the result set would be
 qualitatively different from FTS/hybrid results and would confuse users who
-just upgraded. Detect by `SELECT COUNT(*) FROM paper_fts` before executing any
-query.
+just upgraded. Detect by checking for a row in `search_index_state` (not by
+`SELECT COUNT(*) FROM paper_fts`): an empty `paper_fts` is valid for a library
+with zero papers after a successful rebuild, so a row count of 0 is not a
+reliable signal. If no row exists in `search_index_state`, the index has never
+been built.
 
 **Backward compatibility:** The existing `--field title|authors|summary|all`
 flag is retained as an optional filter layered on top of `--mode`, not as a
@@ -874,7 +907,7 @@ engine            = "pdfplumber"
 markdown_backend  = "none"        # "openai_pdf" | "none"; default "none" only to
                                   # avoid accidental API cost. Preferred v1.3 path
                                   # is "openai_pdf". Set explicitly to enable.
-markdown_model    = "openai:gpt-5.4"  # provider prefix required; unprefixed names route to Anthropic
+markdown_model    = "openai:gpt-5.4"  # prefix required; only "openai" or "openai-compat" accepted
 markdown_require_validation    = true
 markdown_fallback_to_txt       = true
 markdown_fallback_partial      = false   # use "partial" validated markdown
@@ -926,10 +959,13 @@ class AppConfig:                  # add search field
 ```
 
 `load_config` reads `_section(data, "search")` and constructs `SearchConfig`
-with the defaults shown above. `markdown_model` is validated at config load
-time via `split_model_string(markdown_model)` — same pattern as `ai.model` in
-`_load_ai_config` — so a misconfigured prefix fails immediately on startup
-rather than at extraction time.
+with the defaults shown above. `markdown_model` validation at config load is
+stricter than `ai.model`: (1) a provider prefix is required — unprefixed strings
+do **not** route to Anthropic and instead raise `ConfigError`; (2) the provider
+must be `openai` or `openai-compat` — any other value (including `anthropic`,
+`openrouter`) raises `ConfigError`. This matches the runtime constraint in
+`call_ai_with_pdf` and surfaces misconfiguration immediately on startup rather
+than at extraction time.
 
 ---
 
@@ -967,12 +1003,21 @@ so chunking tests are deterministic.
 - `test_search_json.py` — JSON schema validation against known fixture query
 - `test_search_degraded.py` — hybrid search with no embeddings emits warning
   line and returns keyword + fuzzy results; semantic mode exits non-zero;
-  `paperlib search` before `rebuild-search-index` (empty `paper_fts`) exits
-  non-zero with "search index not built" message and does not fall back to LIKE
+  `paperlib search` with no `search_index_state` row exits non-zero with
+  "search index not built" message; empty `paper_fts` after a successful
+  rebuild (zero papers) does NOT trigger the error
 - `test_config.py` — `SearchConfig` loaded with correct defaults; extended
   `ExtractionConfig` fields parsed correctly; `markdown_model` with missing
-  provider prefix raises `ConfigError` at load time; `search.alias_file`
-  override accepted; `AppConfig.search` present on loaded config
+  prefix raises `ConfigError`; `markdown_model` with `anthropic:` or
+  `openrouter:` prefix raises `ConfigError`; `openai-compat:` prefix accepted;
+  `search.alias_file` override accepted; `AppConfig.search` present
+- `test_embeddings_invalidation.py` — changing `embedding_model` config causes
+  re-embed on next run (source_hash unchanged, model changed → mismatch);
+  changing dimension (different model) also invalidates; both paper and chunk
+  embeddings tested
+- `test_stale_chunks.py` — after deleting a JSON record and running
+  `rebuild-search-index`, chunks and chunk_embeddings for that paper_id are
+  removed; `search_index_state.record_count` reflects the new count
 - `test_ai_client.py` — `call_ai_with_pdf` calls `split_model_string(model)`
   internally; `markdown_model = "openai:gpt-5.4"` routes to OpenAI backend;
   Anthropic provider string raises `AIError` immediately
@@ -989,24 +1034,21 @@ New runtime deps:
 
 | Package | Required? | Purpose |
 |---|---|---|
-| `rapidfuzz` | **Required** | Fuzzy string matching (core search feature) |
+| `rapidfuzz` | **Required** | Fuzzy string matching |
 | `numpy` | **Required** | Vector math for embeddings |
-| `sentence-transformers` | Optional | Local embedding model (~80 MB download) |
+| `sentence-transformers` | **Required** | Local embedding model (~90 MB download on first run) |
 
-`rapidfuzz` and `numpy` are small and always required — fuzzy search is a
-core feature, not an optional extra. Only `sentence-transformers` is optional
-(needed only when `embedding_backend = "local"`).
+Search and embeddings are standard paperlib features, not an optional extra.
+All three packages ship as required dependencies.
 
 ```toml
 # pyproject.toml
 dependencies = [
     "rapidfuzz",
     "numpy",
+    "sentence-transformers",
     ...
 ]
-
-[project.optional-dependencies]
-search = ["sentence-transformers"]
 
 [tool.setuptools.package-data]
 "paperlib.search.data" = ["*.toml"]
@@ -1016,10 +1058,9 @@ The `search/data/` directory must contain an `__init__.py` so setuptools
 recognises it as a package. The alias file is loaded at runtime via
 `importlib.resources.files("paperlib.search.data").joinpath("search_aliases.toml")`.
 
-Install:
-- Core (keyword + fuzzy): no extra step — `rapidfuzz` and `numpy` are bundled.
-- With local embeddings: `pip install -e ".[search]"` (dev) or
-  `pip install paperlib[search]` (published).
+Install: `pip install -e .` (dev) or `pip install paperlib` (published). No
+extra step required — the embedding model downloads on first use (~90 MB from
+Hugging Face) and is cached locally thereafter.
 
 ---
 
@@ -1027,10 +1068,10 @@ Install:
 
 After upgrading to v1.3:
 
-1. `rapidfuzz` and `numpy` are bundled as required deps — no extra install step
-   for keyword and fuzzy search. For local embeddings only:
-   - Published package: `pip install paperlib[search]`
-   - Local development: `pip install -e ".[search]"`
+1. `rapidfuzz`, `numpy`, and `sentence-transformers` are all required deps —
+   `pip install paperlib` or `pip install -e .` installs everything. No extra
+   `[search]` step. The embedding model (~90 MB) downloads from Hugging Face on
+   first use of `embed` or `rebuild-search-index --embeddings`.
 2. Optional: `paperlib extract-markdown --all` — produces `.md` files for all
    papers. Requires AI API key; costs API calls per PDF. **Run this before
    rebuilding the index** so the chunker uses high-confidence Markdown. Without
@@ -1079,7 +1120,10 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `_clear_index_tables` updated: deletes `paper_fts`, `chunk_embeddings`, `paper_embeddings`, `chunks`, runs `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')` (inside the transaction), then clears base tables — so `rebuild-index` leaves `chunk_fts` empty and consistent
 - [ ] `paperlib rebuild-search-index` builds schema v3, chunks, FTS
 - [ ] `rebuild-search-index --dry-run` computes chunk counts, skips all DB writes
-- [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup runs unconditionally after chunk rebuild (step 5b), not gated on `--embeddings`
+- [ ] `chunk_embeddings` has no FK to `chunks`; orphan cleanup runs unconditionally (by chunk_id AND paper_id), not gated on `--embeddings`
+- [ ] Stale chunks for deleted JSON records removed at start of rebuild (`DELETE FROM chunks WHERE paper_id NOT IN current_ids`)
+- [ ] `chunk_fts` rebuilt once per `rebuild-search-index` run (not once per paper)
+- [ ] `search_index_state` upserted after every successful rebuild with `built_at`, `record_count`, `chunk_count`
 - [ ] Chunker selects file via `summary.source_file_hash` first, then status/quality/word_count
 - [ ] Chunk table replacement and `chunk_fts` rebuild happen in one transaction
 - [ ] Chunk IDs are deterministic: same source text + config → same `chunk_id`
@@ -1092,12 +1136,11 @@ paperlib search "ferromagnetic hybrid resonator"
 
 **Embeddings**
 - [ ] `paperlib embed` exits with actionable message if `chunks` table is empty
-- [ ] Missing `sentence-transformers` produces install instruction and exits
+- [ ] `sentence-transformers` is a required dep; no optional `[search]` extra
 - [ ] `embed --dry-run` reports missing/stale counts, skips model load and DB writes
 - [ ] `paperlib embed` stores float32 embeddings (dim=384) in SQLite with `source_hash` and
       `dimension`
-- [ ] Semantic search skips embeddings whose `source_hash` does not match
-      current source text hash (stale vector protection)
+- [ ] Semantic search skips embeddings where `source_hash`, `model`, or `dimension` does not match; all three must agree
 
 **Search**
 - [ ] `paperlib search "query"` defaults to hybrid mode
@@ -1106,7 +1149,7 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] `paperlib search "query" --json` produces stable JSON with `source_type`,
       `location_confidence`, `page_start`, `page_end`, `snippet`, score breakdown
 - [ ] Alias expansion shown in terminal output and `--json`
-- [ ] `paperlib search` detects empty `paper_fts` and exits non-zero with "search index not built" message; no LIKE fallback
+- [ ] `paperlib search` detects missing `search_index_state` row and exits non-zero with "search index not built" message; no LIKE fallback; empty `paper_fts` with a valid state row (zero-paper library) is not an error
 - [ ] `--field` restricts FTS columns and fuzzy fields per mapping table; semantic search ignores `--field`; `--help` documents this
 - [ ] `--sort` retained; default ordering is relevance/score (not year)
 - [ ] Keyword search works without embeddings (graceful fallback)
@@ -1124,6 +1167,6 @@ paperlib search "ferromagnetic hybrid resonator"
 - [ ] All new code covered by tests (including degraded-mode and stale-embedding
       scenarios)
 - [ ] `ExtractionConfig` extended with markdown fields; `SearchConfig` added; `AppConfig.search` wired in `load_config`
-- [ ] `markdown_model` validated via `split_model_string` at config load time (raises `ConfigError` on bad prefix)
+- [ ] `markdown_model` validated at config load: prefix required; only `openai` or `openai-compat` accepted; `anthropic`, `openrouter`, unprefixed all raise `ConfigError`
 - [ ] `config.example.toml` updated with all new keys (including `openai:` prefix on `markdown_model`)
 - [ ] CHANGELOG entry written
